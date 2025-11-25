@@ -22,8 +22,10 @@ import argparse
 import os
 import glob
 import shutil
-import subprocess
+from . import flatunzip
+from . import jupyter2md
 import openai
+from pathlib import Path
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception
 
@@ -50,7 +52,7 @@ def unzip_submissions(session_folder, students_dir):
     os.makedirs(students_dir, exist_ok=True)
     for zip_file in zip_files:
         print(f"Unzipping {zip_file}...")
-        subprocess.run(['python', 'flatunzip.py', zip_file, '-o', students_dir], check=True)
+        flatunzip.unpack_and_flatten(zip_file, students_dir)
     print("Unzipping completed.")
 
 def copy_reference_notebook(session_folder, students_dir):
@@ -78,7 +80,7 @@ def convert_notebooks(students_dir):
         except OSError:
             pass
 
-    subprocess.run(['python', 'jupyter2md.py', students_dir], check=True)
+    jupyter2md.convert_notebooks(Path(students_dir))
     print("Conversion to markdown completed.")
 
 def get_student_name_from_path(path):
