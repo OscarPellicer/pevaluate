@@ -1,45 +1,24 @@
 '''
 This script automates the correction pipeline for JupyterLab sessions.
 Usage:
-    1) Install the dependencies: openai, dotenv, tenacity
+    1) Install the dependencies: openai, dotenv, tenacity, python-docx, pypdf
     2) Set the OPENROUTER_API_KEY in the .env file.
-    3) Make sure the session folder contains the following files:
-        <session_folder>/grupo_l1.zip : as downloaded from Moodle, with option "Download all files" > "Include subfolders". All zips will be flatunzipped.
-        <session_folder>/grupo_l2.zip
-        ...
-        <session_folder>/notebook.ipynb : the reference notebook: the name must not contain "student"
-        <session_folder>/example.txt : an example of feedback, name must be exactly "example.txt".
-        <session_folder>/Rubrica.txt : the rubric for the session, containing the points for each question. Name must be exactly "Rubrica.txt".
-    4) Run the script:
-        python autocorrect.py <session_folder>
-    5) Run the script for some specific students:
-        python autocorrect.py <session_folder> --student <student_name>
-    6) Run the script wihtout unzipping, converting or grading (which would do nothing):
-        python autocorrect.py <session_folder> --no-unzip --no-convert --no-grade
+    3) Make sure the session folder contains the required files (rubric, example, reference).
+    4) Run the script: autocorrect <session_folder>
 '''
 
 import argparse
 import os
 import glob
 import shutil
+import re
 from . import flatunzip
 from . import jupyter2md
+from . import utils
 import openai
 from pathlib import Path
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception
-
-def find_reference_notebook(session_folder):
-    """Finds the reference notebook in the session folder."""
-    notebooks = glob.glob(os.path.join(session_folder, '*.ipynb'))
-    # Simple heuristic: the one with the shortest name, not containing "student"
-    # and not inside the students folder.
-    notebooks = [nb for nb in notebooks if 'student' not in nb.lower()]
-    if not notebooks:
-        return None
-    ref_notebook = min(notebooks, key=len)
-    print(f"Found reference notebook: {ref_notebook}")
-    return ref_notebook
 
 def unzip_submissions(session_folder, students_dir):
     """Unzips all student submissions."""
@@ -49,26 +28,38 @@ def unzip_submissions(session_folder, students_dir):
         print("No zip files found in the session folder.")
         return
 
+    # Clean up existing students directory to avoid duplicates from previous runs
+    if os.path.exists(students_dir):
+        print(f"Cleaning up existing students directory: {students_dir}")
+        # On Windows, sometimes rmtree fails if a file is open or locked.
+        # We'll try to handle it gracefully or just remove content.
+        try:
+            shutil.rmtree(students_dir)
+        except PermissionError:
+            print(f"Warning: Could not fully remove {students_dir}. Trying to empty it instead.")
+            for root, dirs, files in os.walk(students_dir):
+                for f in files:
+                    try:
+                        os.unlink(os.path.join(root, f))
+                    except Exception as e:
+                        print(f"Failed to delete {f}: {e}")
+                for d in dirs:
+                    try:
+                        shutil.rmtree(os.path.join(root, d))
+                    except Exception as e:
+                        print(f"Failed to delete directory {d}: {e}")
+        except Exception as e:
+             print(f"Error cleaning students dir: {e}")
+
     os.makedirs(students_dir, exist_ok=True)
     for zip_file in zip_files:
         print(f"Unzipping {zip_file}...")
         flatunzip.unpack_and_flatten(zip_file, students_dir)
     print("Unzipping completed.")
 
-def copy_reference_notebook(session_folder, students_dir):
-    """Copies the reference notebook to the students' directory."""
-    print("Copying reference notebook...")
-    reference_notebook = find_reference_notebook(session_folder)
-    if reference_notebook:
-        print(f"Found reference notebook: {reference_notebook}")
-        shutil.copy(reference_notebook, students_dir)
-        print("Reference notebook copied.")
-    else:
-        print("Warning: Reference notebook not found.")
-
-def convert_notebooks(students_dir):
-    """Converts notebooks to markdown."""
-    print("Converting notebooks to markdown...")
+def convert_notebooks_batch(students_dir):
+    """Converts notebooks to markdown (batch processing)."""
+    print("Converting notebooks to markdown (batch)...")
     if not os.path.exists(students_dir):
         print(f"Students directory '{students_dir}' not found. Skipping conversion.")
         return
@@ -86,12 +77,27 @@ def convert_notebooks(students_dir):
 def get_student_name_from_path(path):
     """Extracts student name from file path."""
     filename = os.path.basename(path)
-    # Assuming name is between the first and second underscore, a bit fragile.
     parts = filename.split('_')
+    
+    # Heuristic: Look for a part containing a comma
+    for part in parts:
+        if ',' in part:
+            return part
+            
+    # Fallback: Assuming name is between the first and second underscore (Old Logic)
+    # But with new flatunzip format: Zip_Hash_Suffix
+    # If Suffix is Student_File, then parts[2] is Student.
     if len(parts) > 2:
-        return parts[1]
-    return "unknown_student"
-
+        # If we are using the new format with hash at parts[1]
+        # parts[0] = Zip, parts[1] = Hash.
+        # So parts[2] might be the name if not comma found (e.g. if flatunzip fell back)
+        # But wait, flatunzip now uses underscores to join parts, so the student name might be split across parts if it contained underscores (unlikely for names but possible)
+        # However, comma is the strong signal.
+        if len(parts) > 2:
+            return parts[2]
+            
+    # Fallback to filename without extension
+    return os.path.splitext(filename)[0]
 
 def is_retryable_api_error(e):
     if isinstance(e, (openai.APIConnectionError, openai.RateLimitError)):
@@ -107,7 +113,7 @@ def get_llm_response(client, model, messages):
         messages=messages,
     )
 
-def grade_submissions(session_folder, students_dir, model, student_filter=None):
+def grade_submissions(session_folder, students_dir, args):
     """Grades all student submissions using an LLM."""
     print("Starting LLM-based grading...")
     load_dotenv()
@@ -121,103 +127,123 @@ def grade_submissions(session_folder, students_dir, model, student_filter=None):
         api_key=api_key,
     )
 
-    rubric_file = glob.glob(os.path.join(session_folder, 'Rúbrica*.txt'))
-    if not rubric_file:
-        print("Error: Rubric file not found.")
+    # Load Rubric
+    rubric_path = os.path.join(session_folder, args.rubric)
+    if not os.path.exists(rubric_path):
+        print(f"Error: Rubric file not found at {rubric_path}")
         return
-    rubric_file = rubric_file[0]
-    print(f"Using rubric: {rubric_file}")
-
-    with open(rubric_file, 'r', encoding='utf-8') as f:
+    print(f"Using rubric: {rubric_path}")
+    with open(rubric_path, 'r', encoding='utf-8') as f:
         rubric = f.read()
 
-    reference_notebook_path = find_reference_notebook(session_folder)
-    if not reference_notebook_path:
-        print("Error: Reference notebook not found for grading.")
+    # Load Example
+    example_path = os.path.join(session_folder, args.example)
+    if not os.path.exists(example_path):
+        print(f"Error: Example feedback file not found at {example_path}")
         return
-    
-    # Find the converted reference notebook, allowing for suffixes added by jupyter2md.py
-    ref_notebook_name = os.path.basename(reference_notebook_path).replace('.ipynb', '')
-    
-    # Search for the markdown file that starts with the reference notebook name
-    ref_notebook_md_paths = glob.glob(os.path.join(students_dir, f'{ref_notebook_name}*.md'))
-
-    if not ref_notebook_md_paths:
-        print(f"Error: Converted reference notebook starting with '{ref_notebook_name}' not found in '{students_dir}'")
-        return
-    
-    ref_notebook_md_path = ref_notebook_md_paths[0] # Take the first match
-    print(f"Found converted reference notebook: {ref_notebook_md_path}")
-        
-    with open(ref_notebook_md_path, 'r', encoding='utf-8') as f:
-        reference_notebook_md = f.read()
-
-    # Read the example review
-    with open(os.path.join(session_folder, 'example.txt'), 'r', encoding='utf-8') as f:
+    print(f"Using example review: {example_path}")
+    with open(example_path, 'r', encoding='utf-8') as f:
         example_review = f.read()
-    print(f"Using example review:\n{example_review}")
 
-    student_notebooks_md = glob.glob(os.path.join(students_dir, '*.md'))
-    # Exclude the reference notebook from the list of student notebooks
-    student_notebooks_md = [p for p in student_notebooks_md if os.path.basename(p) != os.path.basename(ref_notebook_md_path)]
-
-    if student_filter:
-        if isinstance(student_filter, str):
-            student_filter = [student_filter]
-        
-        matched_filters = set()
-        filtered_notebooks = []
-        for p in student_notebooks_md:
-            for s in student_filter:
-                if s.lower() in os.path.basename(p).lower():
-                    filtered_notebooks.append(p)
-                    matched_filters.add(s)
-                    break 
-        
-        student_notebooks_md = filtered_notebooks
-
-        for s in student_filter:
-            if s not in matched_filters:
-                print(f"Warning: No notebook found matching filter '{s}'")
+    # Load Reference(s)
+    # Check if absolute path or relative to session folder
+    ref_paths = args.reference.split(';')
+    reference_content = ""
     
-    print(f"Found {len(student_notebooks_md)} notebooks to grade matching filter.")
+    for i, ref_path in enumerate(ref_paths):
+        ref_path = ref_path.strip()
+        if not ref_path:
+            continue
+            
+        if not os.path.isabs(ref_path):
+            ref_path = os.path.join(session_folder, ref_path)
+        
+        if not os.path.exists(ref_path):
+            print(f"Error: Reference file not found at {ref_path}")
+            # We continue to next reference file instead of returning, 
+            # to allow partial runs if one file is missing but others exist? 
+            # Or should we fail hard? Let's fail hard to avoid bad grading.
+            return
+        
+        print(f"Using reference file {i+1}: {ref_path}")
+        content = utils.read_file_content(ref_path)
+        reference_content += f"\n\n--- Reference File {i+1} ({os.path.basename(ref_path)}) ---\n{content}\n"
 
-    for student_md_path in student_notebooks_md:
-        student_name = get_student_name_from_path(student_md_path)
-        print(f"Grading submission for {student_name}...")
+    # Find Student Files
+    student_files = []
+    regex = re.compile(args.files_regex)
+    
+    for root, dirs, files in os.walk(students_dir):
+        for file in files:
+            if regex.match(file):
+                student_files.append(os.path.join(root, file))
+
+    # Filter by student name if provided
+    if args.student:
+        student_filters = [s.strip() for s in args.student.split(';')]
+        filtered_files = []
+        matched_filters = set()
+        for p in student_files:
+            for s in student_filters:
+                if s.lower() in os.path.basename(p).lower():
+                    filtered_files.append(p)
+                    matched_filters.add(s)
+                    break
+        student_files = filtered_files
         
-        with open(student_md_path, 'r', encoding='utf-8') as f:
-            student_notebook_md = f.read()
+        for s in student_filters:
+            if s not in matched_filters:
+                print(f"Warning: No file found matching filter '{s}'")
+
+    print(f"Found {len(student_files)} files to grade matching regex and filter.")
+
+    for student_file_path in student_files:
+        # Skip if it's the reference file (unlikely if in students dir, but good safety)
+        if os.path.abspath(student_file_path) == os.path.abspath(ref_path):
+            continue
+
+        student_name = get_student_name_from_path(student_file_path)
+        print(f"Grading submission for {student_name} ({os.path.basename(student_file_path)})...")
         
-        prompt = f"""You are a helpful assistant that grades the notebooks of the students of the course "Analítica de Datos en Salud" of the University of Valencia. You are given a rubric, a reference notebook and a notebook to grade. The rubric includes not only the points for each question, but also some examples of specific reviews that should be given to the students for specific response. You need to grade the notebook according to the rubric and review the exercises from the students. Report the marks for each question and the total mark for the notebook scaled to 10 points. The final feedback should be extremely brief, just the marks for each exercise and any maximum a setence for every exercise where points were deducted. Provide the feedback in the same language as the ones the students used to answer the questions.
+        student_content = utils.read_file_content(student_file_path)
+        
+        prompt = \
+f"""You are a helpful assistant that grades the exercises of the students of the course "Analítica de Datos en Salud" of the University of Valencia. You are given a rubric, a reference solution and a student submission to grade. The rubric includes not only the points for each question, but also some examples of specific reviews that should be given to the students for specific response. You need to grade the submission according to the rubric. Report the marks for each question and the total mark scaled to 10 points. The final feedback should be extremely brief, just the marks for each exercise and any maximum a setence for every exercise where points were deducted. Provide the feedback in the same language as the ones the students used to answer the questions.
 
 Here is the rubric:
----
+
 {rubric}
----
+--------------------------------
 
-Here is the reference notebook:
----
-{reference_notebook_md}
----
+Here is the reference solution:
 
-Here is the student's notebook to grade:
----
-{student_notebook_md}
----
+{reference_content}
+--------------------------------
+
+Here is the student's submission to grade:
+
+{student_content}
+--------------------------------
 
 Here is an example of review (note that the exercises might be completely different, this is just an example of the expected format):
----
+
 {example_review}
----
+--------------------------------
 
 Please provide the feedback now.
 """
+        if args.keep_prompt:
+            prompts_dir = os.path.join(session_folder, 'prompts')
+            os.makedirs(prompts_dir, exist_ok=True)
+            prompt_file = os.path.join(prompts_dir, f"prompt_{student_name}.txt")
+            with open(prompt_file, 'w', encoding='utf-8') as f:
+                f.write(prompt)
+            print(f"Prompt for {student_name} saved to {prompt_file}")
 
         try:
             response = get_llm_response(
                 client,
-                model,
+                args.model,
                 [
                     {"role": "system", "content": "You are a teaching assistant for a data science course."},
                     {"role": "user", "content": prompt},
@@ -232,56 +258,55 @@ Please provide the feedback now.
                 f.write(feedback)
             print(f"Feedback for {student_name} saved to {feedback_file}")
 
-        except openai.APIConnectionError as e:
-            print(f"Connection error for {student_name}: Could not connect to OpenRouter. Please check your network connection.")
-            print(f"Underlying error: {e.__cause__}")
-            continue
-        except openai.RateLimitError as e:
-            print(f"Rate limit exceeded for {student_name}. Please check your OpenRouter plan and usage limits.")
-            continue
-        except openai.AuthenticationError as e:
-            print(f"Authentication error for {student_name}. Please check your OPENROUTER_API_KEY in the .env file.")
-            continue
-        except openai.APIStatusError as e:
-            print(f"OpenRouter API error for {student_name} (Status code: {e.status_code}):")
-            try:
-                # Try to print the JSON response for better readability
-                print(e.response.json())
-            except:
-                # Fallback to raw text if it's not JSON
-                print(e.response.text)
-            continue
         except Exception as e:
-            print(f"An unexpected error occurred while grading {student_name}: {e}")
+            print(f"An error occurred while grading {student_name}: {e}")
             continue
 
 def main():
     parser = argparse.ArgumentParser(description="Automate the correction pipeline for lab sessions.")
     parser.add_argument("session_folder", help="The path to the lab session folder (e.g., 'P1 - SADC').")
     parser.add_argument("--no-unzip", action="store_true", help="Skip the unzipping step.")
-    parser.add_argument("--no-convert", action="store_true", help="Skip the notebook to markdown conversion step.")
+    parser.add_argument("--no-convert", action="store_true", help="Skip the batch notebook to markdown conversion step.")
     parser.add_argument("--no-grade", action="store_true", help="Skip the LLM-based grading step.")
     parser.add_argument("--model", default="google/gemini-3-pro-preview", help="The model to use for grading on OpenRouter.")
-    parser.add_argument("--student", help="Filter to grade only a specific student's notebook (a part of the filename). Can be a semicolon-separated list.")
+    parser.add_argument("--student", help="Filter to grade only a specific student's submission (part of the filename). Can be a semicolon-separated list.")
+    
+    # New arguments for generalization
+    parser.add_argument("--rubric", default="rubric.txt", help="Name of the rubric file in the session folder.")
+    parser.add_argument("--example", default="example.txt", help="Name of the example feedback file in the session folder.")
+    parser.add_argument("--reference", default="solutions.ipynb", help="Name or path of the reference solution file(s). Multiple files can be separated by semicolon (;).")
+    parser.add_argument("--files-regex", default=r".*\.ipynb$", help="Regex to match student files to grade.")
+    parser.add_argument("--remove-files-regex", help="Regex to remove specific files from the students directory after unzipping.")
+    parser.add_argument("--keep-prompt", action="store_true", help="Save the grading prompt to a file for debugging.")
 
     args = parser.parse_args()
 
     session_folder = args.session_folder
     students_dir = os.path.join(session_folder, 'students')
     
-    student_filter = args.student
-    if student_filter:
-        student_filter = [s.strip() for s in student_filter.split(';')]
-
     if not args.no_unzip:
         unzip_submissions(session_folder, students_dir)
-        copy_reference_notebook(session_folder, students_dir)
+
+    if args.remove_files_regex:
+        print(f"Removing files matching regex: {args.remove_files_regex}")
+        remove_regex = re.compile(args.remove_files_regex)
+        count_removed = 0
+        for root, dirs, files in os.walk(students_dir):
+            for file in files:
+                if remove_regex.match(file):
+                    try:
+                        os.remove(os.path.join(root, file))
+                        count_removed += 1
+                    except OSError as e:
+                        print(f"Error removing {file}: {e}")
+        print(f"Removed {count_removed} files.")
 
     if not args.no_convert:
-        convert_notebooks(students_dir)
+        # We still support batch conversion for .ipynb files as it's useful for manual inspection
+        convert_notebooks_batch(students_dir)
     
     if not args.no_grade:
-        grade_submissions(session_folder, students_dir, args.model, student_filter)
+        grade_submissions(session_folder, students_dir, args)
 
     print("Pipeline finished.")
 

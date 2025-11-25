@@ -19,24 +19,83 @@ def unpack_and_flatten(zip_path, output_path):
     zip_basename = os.path.splitext(os.path.basename(zip_path))[0]
 
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        for member in zip_ref.infolist():
+        members = zip_ref.infolist()
+        print(f"Found {len(members)} items in zip file.")
+        count = 0
+        for member in members:
             if member.is_dir():
+                continue
+            
+            # Skip Mac OS X metadata
+            if '__MACOSX' in member.filename or '.DS_Store' in member.filename:
                 continue
 
             original_path = member.filename
-            flattened_path = original_path.replace('/', '_').replace('\\', '_')
+            # Sanitize filename to ascii to avoid issues
+            safe_name = original_path.encode('ascii', 'ignore').decode()
+            flattened_path = safe_name.replace('/', '_').replace('\\', '_')
             
-            new_filename = f"{zip_basename}_{flattened_path}"
+            # Truncate zip basename if too long (keep first 10 chars)
+            short_zip_name = zip_basename[:10]
             
+            # Use a hash for the flattened path to guarantee unique short filenames
+            import hashlib
+            # Create a hash based on the *original relative path* inside the zip
+            # This ensures the same file always gets the same hash
+            name_hash = hashlib.md5(original_path.encode('utf-8')).hexdigest()[:8]
+            ext = os.path.splitext(flattened_path)[1]
+            
+            # Heuristic: Find parts of the path that look like student names (contain a comma)
+            # original_path uses forward or backward slashes
+            path_parts = safe_name.replace('\\', '/').split('/')
+            student_parts = [p for p in path_parts if ',' in p]
+            
+            if student_parts:
+                # Use the found student part(s) and the filename
+                filename_part = path_parts[-1]
+                
+                relevant = []
+                for p in student_parts:
+                    if p not in relevant:
+                        relevant.append(p)
+                if filename_part not in relevant:
+                    relevant.append(filename_part)
+                
+                safe_suffix = "_".join(relevant)
+            else:
+                # Fallback: use the end of the flattened path
+                safe_suffix = flattened_path[-50:] if len(flattened_path) > 50 else flattened_path
+
+            # Sanitize
+            safe_suffix = safe_suffix.replace('/', '_').replace('\\', '_')
+
+            # Length check - Aggressive truncation for deep paths
+            # Max filename length target: ~80 chars
+            # short_zip(10) + hash(8) + separators(2) = 20 chars used.
+            # Available for suffix: 60 chars.
+            if len(safe_suffix) > 60:
+                 safe_suffix = safe_suffix[:30] + "..." + safe_suffix[-20:]
+
+            new_filename = f"{short_zip_name}_{name_hash}_{safe_suffix}"
+            
+            # Final safety check
+            if len(new_filename) > 100:
+                 new_filename = f"{short_zip_name}_{name_hash}{ext}"
+
             output_filepath = os.path.join(output_path, new_filename)
 
-            # Extract the file data
-            file_data = zip_ref.read(member.filename)
+            try:
+                # Extract the file data
+                file_data = zip_ref.read(member.filename)
 
-            # Write the data to the new flattened file
-            with open(output_filepath, 'wb') as f:
-                f.write(file_data)
-    print(f"Successfully unpacked and flattened {zip_path} to {output_path}")
+                # Write the data to the new flattened file
+                with open(output_filepath, 'wb') as f:
+                    f.write(file_data)
+                count += 1
+            except Exception as e:
+                print(f"Failed to extract {member.filename}: {e}")
+
+        print(f"Successfully unpacked and flattened {count} files from {zip_path} to {output_path}")
 
 
 def main():

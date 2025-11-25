@@ -1,6 +1,6 @@
 # Autocorrect
 
-This tool automates the correction pipeline for JupyterLab sessions. It unzips student submissions, converts notebooks to Markdown, and uses an LLM (via OpenRouter) to grade them based on a provided rubric.
+This tool automates the correction pipeline for grading student submissions. It supports unzipping submissions, converting/reading various file formats (Jupyter Notebooks, PDF, Word, Text, Code), and using an LLM (via OpenRouter) to grade them based on a provided rubric.
 
 ## Installation
 
@@ -10,30 +10,21 @@ It is recommended to use the `autotestia2` conda environment for this project.
 conda activate autotestia2
 ```
 
-To install the library:
+To install the library in editable mode (recommended for development):
 
 ```bash
-pip install .
+pip install -e .
 ```
 
 ## Setup
 
-1.  Create a `.env` file in the directory where you run the script (or ensure it's loaded) with your OpenRouter API key:
+1.  Create a `.env` file with your OpenRouter API key:
 
     ```env
     OPENROUTER_API_KEY=your_api_key_here
     ```
 
-2.  Prepare your session folder structure:
-
-    ```
-    <session_folder>/
-    ├── grupo_l1.zip          # Student submissions zip (downloaded with "Include subfolders")
-    ├── grupo_l2.zip          # More student submissions...
-    ├── notebook.ipynb        # The reference notebook (name must NOT contain "student")
-    ├── example.txt           # Example feedback (must be exactly "example.txt")
-    └── Rubrica.txt           # Grading rubric (must be exactly "Rubrica.txt")
-    ```
+2.  Prepare your session folder structure.
 
 ## Usage
 
@@ -43,30 +34,70 @@ Run the correction pipeline:
 autocorrect <session_folder>
 ```
 
-### Options
+### Arguments & Options
 
--   **Grade specific student(s):**
-    ```bash
-    autocorrect <session_folder> --student "Student Name"
-    ```
-    Multiple students can be separated by semicolons.
+| Argument | Description | Default |
+| :--- | :--- | :--- |
+| `session_folder` | Path to the lab session folder. | **Required** |
+| `--model` | The LLM model to use via OpenRouter. | `google/gemini-3-pro-preview` |
+| `--rubric` | Name of the rubric file in the session folder. | `rubric.txt` |
+| `--example` | Name of the example feedback file in the session folder. | `example.txt` |
+| `--reference` | Name or path of reference solution file(s). Multiple files separated by `;`. | `solutions.ipynb` |
+| `--files-regex` | Regex to select which student files to grade. | `.*\.ipynb$` |
+| `--remove-files-regex`| Regex to delete files immediately after unzipping (e.g., cleanup). | `None` |
+| `--student` | Filter to grade only specific student(s) (semicolon-separated). | `None` (all) |
+| `--keep-prompt` | Save the generated LLM prompt to `prompts/` for debugging. | `False` |
+| `--no-unzip` | Skip the unzipping step. | `False` |
+| `--no-convert` | Skip the batch `.ipynb` to `.md` conversion step. | `False` |
+| `--no-grade` | Skip the LLM grading step. | `False` |
 
--   **Skip steps:**
+## Examples
+
+### Subject 1: Analítica de Datos en Salud (ADS)
+**Scenario:** Student submissions are Jupyter Notebooks.
+
+*   **Structure:**
+    *   `P1 - SADC/`
+        *   `submissions.zip` (Standard Moodle export)
+        *   `P1_ADS.ipynb` (Reference solution)
+        *   `rubric.txt`
+        *   `example.txt`
+*   **Command:**
     ```bash
-    autocorrect <session_folder> --no-unzip
-    autocorrect <session_folder> --no-convert
-    autocorrect <session_folder> --no-grade
+    autocorrect "P1 - SADC" \
+      --reference "P1_ADS.ipynb" \
+      --files-regex ".*\.ipynb$" \
+      --model "google/gemini-3-pro-preview"
     ```
 
--   **Select LLM model:**
+### Subject 2: Sistemas Informáticos (MIB) - BD Practica
+**Scenario:** Student submissions are mixed text, SQL, Word, and PDF files. We need to remove Moodle's `timestamp.txt` files and use multiple reference files.
+
+*   **Structure:**
+    *   `bd_practica/`
+        *   `Practica de bases de datos.zip`
+        *   `enunciado.md`
+        *   `soluciones_definicion.md`
+        *   `soluciones_consultas.md`
+        *   `rubric.txt`
+        *   `example.txt`
+*   **Command:**
     ```bash
-    autocorrect <session_folder> --model "google/gemini-pro"
+    autocorrect "path/to/bd_practica" \
+      --files-regex ".*\.(txt|sql|docx|pdf)$" \
+      --remove-files-regex ".*timestamp\.txt$" \
+      --reference "enunciado.md;soluciones_definicion.md;soluciones_consultas.md" \
+      --keep-prompt \
+      --model "google/gemini-3-pro-preview"
     ```
-    Default model is `google/gemini-3-pro-preview`.
 
 ## Components
 
--   `src/autocorrect/cli.py`: Main script that orchestrates the pipeline.
--   `src/autocorrect/flatunzip.py`: Unzips submissions and flattens directory structures.
--   `src/autocorrect/jupyter2md.py`: Converts Jupyter notebooks to Markdown.
-
+-   `src/autocorrect/cli.py`: Main entry point. Handles arguments, unzipping cleanup, and orchestration.
+-   `src/autocorrect/flatunzip.py`: Unzips submissions. **Features:**
+    *   Sanitizes filenames to ASCII.
+    *   Hashes path components to ensure unique, short filenames (Windows-friendly).
+    *   Preserves student names via heuristic (looking for commas in path).
+    *   Aggressively truncates filenames to avoid `MAX_PATH` issues.
+-   `src/autocorrect/utils.py`: Reads content from `.ipynb`, `.docx`, `.pdf`, and text files.
+-   `src/autocorrect/jupyter2md.py`: Batch converter for notebooks (uses `nbconvert`).

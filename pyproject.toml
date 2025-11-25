@@ -13,7 +13,9 @@ dependencies = [
     "python-dotenv",
     "tenacity",
     "jupyter",
-    "nbconvert"
+    "nbconvert",
+    "python-docx",
+    "pypdf"
 ]
 
 [project.scripts]
@@ -21,4 +23,3 @@ autocorrect = "autocorrect.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

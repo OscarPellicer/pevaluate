@@ -1,0 +1,113 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "ADS: P1 - SADC",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "P1 - SADC",
+                // "--no-unzip",
+                // "--no-convert",
+                "--model", "google/gemini-3-pro-preview",
+                "--reference", "P1_ADS.ipynb"
+                // "--student", "Risueño Guillot, Mireia"
+                // "--student", "Vicente Alonso, Joel Ezequiel; Alcayde López, Lucas"   
+            ]
+        },
+        {
+            "name": "ADS: P2 - Senales biomedicas",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "P2 - Senales biomedicas",
+                // "--no-unzip",
+                // "--no-convert",
+                "--model", "google/gemini-3-pro-preview",
+                "--reference", "P2_ADS.ipynb"
+            ]
+        },
+        {
+            "name": "ADS: P3 - NLP",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "P3 - NLP",
+                "--no-unzip",
+                // "--no-convert",
+                // "--no-grade",
+                "--model", "google/gemini-3-pro-preview",
+                "--reference", "P3_ADS.ipynb"
+                // "--student", "Castellanos Peris, María"
+            ]
+        },
+        {
+            "name": "ADS: P5 - Clasificacion Imagenes",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "P5 - Clasificacion Imagenes",
+                // "--no-unzip",
+                // "--no-convert",
+                "--model", "google/gemini-3-pro-preview",
+                "--reference", "P5_ADS.ipynb"
+            ]
+        },
+        {
+            "name": "MIB - SIySI: BD Practica",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\1er sem - MIB - Sistemas informáticos y sistemas de información\\slides_2025\\bd_practica",
+                "--model", "google/gemini-3-pro-preview",
+                "--files-regex", ".*\\.(txt|sql|docx|pdf)$",
+                "--remove-files-regex", ".*timestamp\\.txt$",
+                "--reference", "enunciado.md;soluciones_definicion.md;soluciones_consultas.md",
+                "--keep-prompt", 
+                // "--no-grade"
+            ]
+        },
+        {
+            "name": "MIB - SIySI: Redes Practica",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\1er sem - MIB - Sistemas informáticos y sistemas de información\\slides_2025\\redes_practica",
+                "--model", "google/gemini-3-pro-preview",
+                "--files-regex", ".*\\.(txt|sql|docx|pdf)$",
+                "--remove-files-regex", ".*timestamp\\.txt$",
+                "--reference", "enunciado.md;soluciones.md",
+                "--keep-prompt", 
+                // "--no-grade"
+            ]
+        },
+        {
+            "name": "MIB - SIySI: XML Practica",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "args": [
+                "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\1er sem - MIB - Sistemas informáticos y sistemas de información\\slides_2025\\xml_practica",
+                "--model", "google/gemini-3-pro-preview",
+                "--files-regex", ".*\\.(txt|sql|docx|pdf)$",
+                "--remove-files-regex", ".*timestamp\\.txt$",
+                "--reference", "enunciado.md;soluciones.md",
+                "--keep-prompt", 
+                // "--no-grade"
+            ]
+        }
+    ]
+}
