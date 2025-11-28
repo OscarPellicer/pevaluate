@@ -113,6 +113,62 @@ def get_llm_response(client, model, messages):
         messages=messages,
     )
 
+def resolve_reference_file(session_folder, students_dir, ref_name):
+    """
+    Attempts to resolve the reference file path using several strategies:
+    1. Exact path (relative or absolute).
+    2. Converted markdown file in students directory (e.g. solutions_0.md).
+    3. Heuristic auto-discovery in session folder if default name is used.
+    """
+    ref_name = ref_name.strip()
+    if not ref_name:
+        return None
+
+    # 1. Exact match (or absolute path)
+    if os.path.isabs(ref_name):
+        if os.path.exists(ref_name):
+            return ref_name
+    else:
+        path = os.path.join(session_folder, ref_name)
+        if os.path.exists(path):
+            return path
+
+    # 2. Look for converted markdown in students_dir
+    # jupyter2md truncates stem to 30 chars and adds _{i}.md
+    base = os.path.splitext(os.path.basename(ref_name))[0]
+    stem = base[:30]
+    # Pattern: stem + underscore + digits + .md
+    # We use a glob to find it
+    md_pattern = os.path.join(students_dir, f"{stem}_*.md")
+    matches = glob.glob(md_pattern)
+    
+    # Filter matches to ensure they follow the pattern (to avoid matching unrelated files that start similarly)
+    # e.g. solutions_consultas vs solutions_0
+    # The pattern from jupyter2md is strictly stem[:30] + "_" + digit + ".md"
+    valid_matches = []
+    for m in matches:
+        filename = os.path.basename(m)
+        # Regex to check format: stem_digits.md
+        if re.match(re.escape(stem) + r"_\d+\.md$", filename):
+            valid_matches.append(m)
+    
+    if valid_matches:
+        print(f"Found converted reference file in students dir: {valid_matches[0]}")
+        return valid_matches[0]
+
+    # 3. Auto-discovery in session folder (heuristic) if ref_name is default
+    if ref_name == "solutions.ipynb":
+         notebooks = glob.glob(os.path.join(session_folder, '*.ipynb'))
+         # Exclude files with 'student' in the name
+         candidates = [nb for nb in notebooks if 'student' not in os.path.basename(nb).lower()]
+         if candidates:
+             # Pick the shortest one as a heuristic
+             best = min(candidates, key=len)
+             print(f"Auto-discovered reference notebook: {best}")
+             return best
+             
+    return None
+
 def grade_submissions(session_folder, students_dir, args):
     """Grades all student submissions using an LLM."""
     print("Starting LLM-based grading...")
@@ -131,7 +187,13 @@ def grade_submissions(session_folder, students_dir, args):
     rubric_path = os.path.join(session_folder, args.rubric)
     if not os.path.exists(rubric_path):
         print(f"Error: Rubric file not found at {rubric_path}")
-        return
+        # If not found, try to look for a file starting with "Rubri" or "rubri" in the session folder
+        rubrics = glob.glob(os.path.join(session_folder, '[Rr]ubri*.txt'))
+        if rubrics:
+             rubric_path = rubrics[0]
+             print(f"Found alternative rubric file: {rubric_path}")
+        else:
+             return
     print(f"Using rubric: {rubric_path}")
     with open(rubric_path, 'r', encoding='utf-8') as f:
         rubric = f.read()
@@ -140,7 +202,13 @@ def grade_submissions(session_folder, students_dir, args):
     example_path = os.path.join(session_folder, args.example)
     if not os.path.exists(example_path):
         print(f"Error: Example feedback file not found at {example_path}")
-        return
+        # If not found, try to look for a file starting with "example" in the session folder
+        examples = glob.glob(os.path.join(session_folder, '[Ee]xample*.txt'))
+        if examples:
+             example_path = examples[0]
+             print(f"Found alternative example file: {example_path}")
+        else:
+             return
     print(f"Using example review: {example_path}")
     with open(example_path, 'r', encoding='utf-8') as f:
         example_review = f.read()
@@ -151,23 +219,19 @@ def grade_submissions(session_folder, students_dir, args):
     reference_content = ""
     
     for i, ref_path in enumerate(ref_paths):
-        ref_path = ref_path.strip()
-        if not ref_path:
-            continue
-            
-        if not os.path.isabs(ref_path):
-            ref_path = os.path.join(session_folder, ref_path)
+        resolved_path = resolve_reference_file(session_folder, students_dir, ref_path)
         
-        if not os.path.exists(ref_path):
-            print(f"Error: Reference file not found at {ref_path}")
-            # We continue to next reference file instead of returning, 
-            # to allow partial runs if one file is missing but others exist? 
-            # Or should we fail hard? Let's fail hard to avoid bad grading.
+        if not resolved_path:
+            print(f"Error: Reference file '{ref_path}' not found.")
+            # We continue to allow other references or fail?
+            # Given that we might need all references, failing is safer if one is missing.
+            # But let's print all missing ones first? 
+            # For now, let's return to avoid grading with missing context.
             return
         
-        print(f"Using reference file {i+1}: {ref_path}")
-        content = utils.read_file_content(ref_path)
-        reference_content += f"\n\n--- Reference File {i+1} ({os.path.basename(ref_path)}) ---\n{content}\n"
+        print(f"Using reference file {i+1}: {resolved_path}")
+        content = utils.read_file_content(resolved_path)
+        reference_content += f"\n\n--- Reference File {i+1} ({os.path.basename(resolved_path)}) ---\n{content}\n"
 
     # Find Student Files
     student_files = []
