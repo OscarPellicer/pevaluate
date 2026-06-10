@@ -1,6 +1,8 @@
-import subprocess
 from pathlib import Path
 import argparse
+import nbformat
+from nbconvert import MarkdownExporter
+from .utils import sanitize_html_artifacts
 
 
 def convert_notebooks(input_path: Path):
@@ -11,7 +13,7 @@ def convert_notebooks(input_path: Path):
         print(f"Error: The provided path '{input_path}' is not a directory.")
         return
         
-    notebooks = list(input_path.glob('*.ipynb'))
+    notebooks = list(input_path.rglob('*.ipynb'))
 
     if not notebooks:
         print(f"No Jupyter notebooks found in '{input_path}'.")
@@ -27,19 +29,15 @@ def convert_notebooks(input_path: Path):
         output_stem = f"{notebook.stem[:30]}_{i}"
 
         try:
-            subprocess.run(
-                ['jupyter', 'nbconvert', '--to', 'markdown', '--output', output_stem, str(notebook)],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            print(f"Successfully converted {notebook.name} to {output_stem}.md")
-        except subprocess.CalledProcessError as e:
-            print(f"Error converting {notebook.name}:")
-            print(e.stderr)
-        except FileNotFoundError:
-             print("Error: 'jupyter' command not found. Please ensure jupyter and nbconvert are installed.")
-             return
+            with open(notebook, "r", encoding="utf-8") as f:
+                nb = nbformat.read(f, as_version=4)
+            body, _ = MarkdownExporter().from_notebook_node(nb)
+            body = sanitize_html_artifacts(body, strip_tags=False)
+            output_path = notebook.parent / f"{output_stem}.md"
+            output_path.write_text(body, encoding="utf-8")
+            print(f"Successfully converted {notebook.name} to {output_path.name}")
+        except Exception as e:
+            print(f"Error converting {notebook.name}: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
