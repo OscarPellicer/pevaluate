@@ -32,5 +32,8 @@ markers = [
 autocorrect = "autocorrect.cli:main"
 pevaluate = "autocorrect.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/OscarPellicer/pevaluate"
+
 [tool.setuptools.packages.find]
 where = ["src"]
