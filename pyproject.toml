@@ -19,6 +19,11 @@ dependencies = [
     "PyYAML"
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "llm: tests that call a real LLM provider and may burn API credits",
+]
+
 [project.scripts]
 autocorrect = "autocorrect.cli:main"
 pevaluate = "autocorrect.cli:main"
