@@ -14,7 +14,10 @@ dependencies = [
     "tenacity",
     "jupyter",
     "matplotlib",
+    "Markdown",
     "nbconvert",
+    "playwright",
+    "pymdown-extensions",
     "python-docx",
     "pypdf",
     "PyYAML"

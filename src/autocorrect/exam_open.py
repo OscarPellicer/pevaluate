@@ -98,11 +98,32 @@ Student:
 
 
 def _render_markdown(text: str) -> str:
+    text = text or ""
+
+    def basic_render(source: str) -> str:
+        parts = []
+        cursor = 0
+        mermaid_pattern = re.compile(r"```mermaid\s*(.*?)```", flags=re.DOTALL)
+        for match in mermaid_pattern.finditer(source):
+            before = source[cursor:match.start()]
+            if before.strip():
+                for block in re.split(r"\n\s*\n", before.strip()):
+                    lines = [html.escape(line) for line in block.splitlines()]
+                    parts.append(f"<p>{'<br>'.join(lines)}</p>")
+            parts.append(f'<div class="mermaid">{html.escape(match.group(1).strip())}</div>')
+            cursor = match.end()
+        tail = source[cursor:]
+        if tail.strip():
+            for block in re.split(r"\n\s*\n", tail.strip()):
+                lines = [html.escape(line) for line in block.splitlines()]
+                parts.append(f"<p>{'<br>'.join(lines)}</p>")
+        return "\n".join(parts) if parts else "<pre></pre>"
+
     try:
         import markdown
 
         rendered = markdown.markdown(
-            text or "",
+            text,
             extensions=["fenced_code", "tables", "pymdownx.arithmatex"],
             extension_configs={"pymdownx.arithmatex": {"generic": True}},
         )
@@ -113,7 +134,7 @@ def _render_markdown(text: str) -> str:
             flags=re.DOTALL,
         )
     except Exception:
-        return f"<pre>{html.escape(text or '')}</pre>"
+        return basic_render(text)
 
 
 def _parse_json_response(text: str) -> dict:
@@ -575,6 +596,35 @@ def _plot_overall_mark_distribution(items: list[dict], output_dir: str) -> Optio
     return plot_path
 
 
+def _write_pdf_from_html(html_path: str, pdf_path: str) -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(Path(html_path).resolve().as_uri(), wait_until="networkidle")
+            try:
+                page.evaluate("() => MathJax.typesetPromise()")
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            page.pdf(
+                path=pdf_path,
+                format="A4",
+                print_background=True,
+                margin={"top": "12mm", "bottom": "12mm", "left": "12mm", "right": "12mm"},
+            )
+            browser.close()
+        return os.path.exists(pdf_path)
+    except Exception:
+        return False
+
+
 def _combined_totals(open_totals: list[dict], mc_feedback: Dict[str, dict]) -> list[dict]:
     combined: Dict[str, dict] = {}
     for item in open_totals:
@@ -818,31 +868,7 @@ def generate_open_response_report(
     html_path = os.path.join(output_dir, "open_responses_report.html")
     Path(html_path).write_text("\n".join(parts), encoding="utf-8")
     pdf_path = os.path.join(output_dir, "open_responses_report.pdf")
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            page.goto(Path(html_path).resolve().as_uri(), wait_until="networkidle")
-            try:
-                page.evaluate("() => MathJax.typesetPromise()")
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-            try:
-                page.wait_for_timeout(1000)
-            except Exception:
-                pass
-            page.pdf(
-                path=pdf_path,
-                format="A4",
-                print_background=True,
-                margin={"top": "12mm", "bottom": "12mm", "left": "12mm", "right": "12mm"},
-            )
-            browser.close()
-    except Exception:
-        pass
+    _write_pdf_from_html(html_path, pdf_path)
     generate_student_feedback_pdfs(scores_csv, output_dir, mc_correction_dir=mc_correction_dir)
     return html_path
 
@@ -960,26 +986,7 @@ def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correcti
         pdf_path = os.path.join(out_dir, f"{_safe_name(student_id)}.pdf")
         Path(html_path).write_text("\n".join(parts), encoding="utf-8")
         html_paths.append(html_path)
-        try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
-                page.goto(Path(html_path).resolve().as_uri(), wait_until="networkidle")
-                try:
-                    page.evaluate("() => MathJax.typesetPromise()")
-                    page.wait_for_timeout(500)
-                except Exception:
-                    pass
-                try:
-                    page.wait_for_timeout(1000)
-                except Exception:
-                    pass
-                page.pdf(path=pdf_path, format="A4", print_background=True)
-                browser.close()
-        except Exception:
-            pass
+        _write_pdf_from_html(html_path, pdf_path)
     return out_dir
 
 
@@ -1127,114 +1134,66 @@ def _write_smoke_png(path: str, lines: list[str]):
         )
 
 
-def _write_smoke_mc_report(mc_dir: str, students: list[tuple[str, str, float, list[str]]]):
+def _write_smoke_scan_page(path: str, student_id: str, student_name: str, score: float):
     try:
-        import shutil
+        from PIL import Image, ImageDraw
+        from PIL import ImageFont
 
-        from pexams.analysis import analyze_results
-        from pexams.correct_exams import correct_exams
-        from pexams.generate_exams import generate_exams
-        from pexams.schemas import PexamOption, PexamQuestion
-        from pexams.utils import load_solutions, set_seeds
-
-        questions = [
-            PexamQuestion(
-                id=1,
-                text="What is the best description of regularization?",
-                options=[
-                    PexamOption(text="It penalizes complexity.", is_correct=True),
-                    PexamOption(text="It removes validation data.", is_correct=False),
-                ],
-            ),
-            PexamQuestion(
-                id=3,
-                text="Which split detects overfitting?",
-                options=[
-                    PexamOption(text="Validation", is_correct=True),
-                    PexamOption(text="Training only", is_correct=False),
-                ],
-            ),
-            PexamQuestion(
-                id=4,
-                text="What happens when λ is too large?",
-                options=[
-                    PexamOption(text="The model may underfit.", is_correct=True),
-                    PexamOption(text="The model always improves.", is_correct=False),
-                ],
-            ),
-        ]
-        pipeline_dir = os.path.join(mc_dir, "_classic_pipeline")
-        exam_output_dir = os.path.join(pipeline_dir, "exam_output")
-        correction_output_dir = os.path.join(pipeline_dir, "correction_results")
-        os.makedirs(correction_output_dir, exist_ok=True)
-
-        set_seeds(seed_questions=None, seed_answers=42)
-        generate_exams(
-            questions=questions,
-            output_dir=exam_output_dir,
-            num_models=1,
-            generate_fakes=len(students),
-            columns=1,
-            exam_title="MC Smoke Exam",
-            exam_course="Test Course",
-            exam_date="2026-06-10",
-            lang="en",
-            generate_references=True,
-            font_size="10pt",
-        )
-        solutions_full, solutions_simple, max_score = load_solutions(exam_output_dir)
-        correct_exams(
-            input_path=os.path.join(exam_output_dir, "simulated_scans"),
-            solutions_per_model=solutions_simple,
-            output_dir=correction_output_dir,
-            questions_dir=exam_output_dir,
-        )
-        analyze_results(
-            os.path.join(correction_output_dir, "correction_results.csv"),
-            output_dir=correction_output_dir,
-            solutions_per_model=solutions_full,
-            max_score=max_score,
-        )
-
-        os.makedirs(os.path.join(mc_dir, "scanned_pages"), exist_ok=True)
-        generated_pages = sorted(Path(correction_output_dir, "scanned_pages").glob("*.png"))
-        for index, (student_id, _student_name, _mc_score, _lines) in enumerate(students):
-            if index < len(generated_pages):
-                shutil.copyfile(generated_pages[index], os.path.join(mc_dir, "scanned_pages", f"{student_id}.png"))
-
-        for name in [
-            "correction_results.csv",
-            "final_marks.csv",
-            "mark_distribution_0_10.png",
-            "question_stats.csv",
-            "stats_report.html",
-            "stats_report.pdf",
-        ]:
-            source = os.path.join(correction_output_dir, name)
-            if os.path.exists(source):
-                shutil.copyfile(source, os.path.join(mc_dir, name))
-
-        # Align the marks used for student-level merging with the open-answer smoke student IDs.
-        with open(os.path.join(mc_dir, "final_marks.csv"), "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["student_id", "student_name", "score", "max_score", "correct", "incorrect", "NA", "mark"])
-            writer.writeheader()
-            for student_id, student_name, mc_score, _lines in students:
-                writer.writerow({
-                    "student_id": student_id,
-                    "student_name": student_name,
-                    "score": mc_score,
-                    "max_score": 3,
-                    "correct": int(mc_score),
-                    "incorrect": 3 - int(mc_score),
-                    "NA": 0,
-                    "mark": round((mc_score / 3) * 10, 2),
-                })
+        image = Image.new("RGB", (1654, 2339), "white")
+        draw = ImageDraw.Draw(image)
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 44)
+            body_font = ImageFont.truetype("arial.ttf", 28)
+        except Exception:
+            title_font = None
+            body_font = None
+        draw.rectangle((90, 100, 1564, 360), outline="black", width=4)
+        draw.text((130, 150), "Corrected Multiple-Choice Template", fill="black", font=title_font)
+        draw.text((130, 230), f"Student: {student_name} ({student_id})", fill="black", font=body_font)
+        draw.text((130, 290), f"Score: {score:.2f}/3.00", fill="black", font=body_font)
+        y = 460
+        for question_no in range(1, 4):
+            draw.rectangle((140, y, 1514, y + 320), outline="#334155", width=3)
+            draw.text((180, y + 40), f"Question {question_no}", fill="black", font=body_font)
+            draw.text((180, y + 120), "Detected answer and correction preview", fill="#475569", font=body_font)
+            draw.line((920, y + 70, 1320, y + 70), fill="#16a34a", width=8)
+            draw.line((920, y + 140, 1320, y + 140), fill="#dc2626", width=8)
+            y += 420
+        image.save(path)
     except Exception:
-        # Keep the smoke pipeline useful even if optional PDF/report dependencies are unavailable.
-        Path(os.path.join(mc_dir, "stats_report.html")).write_text(
-            "<!doctype html><html><body><h1>Exam Statistics Report</h1><p>MC report generation failed in smoke fallback.</p></body></html>",
-            encoding="utf-8",
-        )
+        _write_smoke_png(path, [student_name, "MC correction placeholder"])
+
+
+def _write_smoke_mc_report(mc_dir: str, students: list[tuple[str, str, float, list[str]]]):
+    scans_dir = os.path.join(mc_dir, "scanned_pages")
+    os.makedirs(scans_dir, exist_ok=True)
+    for student_id, student_name, mc_score, _lines in students:
+        _write_smoke_scan_page(os.path.join(scans_dir, f"{student_id}.png"), student_id, student_name, mc_score)
+
+    _write_smoke_png(
+        os.path.join(mc_dir, "mark_distribution_0_10.png"),
+        ["Mark distribution", "MC smoke artifact"],
+    )
+    stats_html_path = os.path.join(mc_dir, "stats_report.html")
+    Path(stats_html_path).write_text(
+        "<!doctype html><html><body><h1>Exam Statistics Report</h1><p>Deterministic MC smoke report generated by pevaluate.</p><h2>Question Analysis</h2><p>Placeholder question analysis for smoke testing.</p></body></html>",
+        encoding="utf-8",
+    )
+    _write_pdf_from_html(stats_html_path, os.path.join(mc_dir, "stats_report.pdf"))
+    with open(os.path.join(mc_dir, "final_marks.csv"), "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["student_id", "student_name", "score", "max_score", "correct", "incorrect", "NA", "mark"])
+        writer.writeheader()
+        for student_id, student_name, mc_score, _lines in students:
+            writer.writerow({
+                "student_id": student_id,
+                "student_name": student_name,
+                "score": mc_score,
+                "max_score": 3,
+                "correct": int(mc_score),
+                "incorrect": 3 - int(mc_score),
+                "NA": 0,
+                "mark": round((mc_score / 3) * 10, 2),
+            })
 
 
 def run_open_answer_smoke_test(output_dir: Optional[str] = None, real_llm: bool = False, model: str = "google/gemini-3.1-pro-preview") -> str:
