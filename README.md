@@ -31,7 +31,7 @@ For Moodle upload/download workflows, enable the feedback tools in the assignmen
 1. Open the assignment settings.
 2. Under **Feedback types**, enable **Feedback files** and **Offline grading worksheet**.
 
-![Enable Feedback Comments](media/moodle.png)
+![Enable Feedback Comments](https://raw.githubusercontent.com/OscarPellicer/pevaluate/main/media/moodle.png)
 
 3. Download the Moodle submissions zip and, later, download the grading worksheet or marks CSV.
 
