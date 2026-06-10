@@ -2,6 +2,52 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "NLP 2026: dry run - unzip and convert only",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "args": [
+                "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\2nd sem - GCD - Procesamiento del Lenguaje Natural\\Trabajo_NLP_2026",
+                "--no-unzip",
+                "--students-dir", "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\2nd sem - GCD - Procesamiento del Lenguaje Natural\\Trabajo_NLP_2026\\submissions",
+                "--extract-nested-zips",
+                "--no-grade",
+                "--model", "google/gemini-3-pro-preview",
+                "--reference", "project_2026_teacher.ipynb",
+                "--rubric", "rubric.txt",
+                "--example", "example.txt",
+                "--files-regex", ".*\\.(ipynb|html)$",
+                "--keep-prompt"
+            ]
+        },
+        {
+            "name": "NLP 2026: grade after checked dry run",
+            "type": "python",
+            "request": "launch",
+            "module": "autocorrect.cli",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "args": [
+                "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\2nd sem - GCD - Procesamiento del Lenguaje Natural\\Trabajo_NLP_2026",
+                "--no-unzip",
+                "--students-dir", "C:\\Users\\Oscar\\My Drive (oscarj1994@gmail.com)\\9. DOCENCIA\\2025-2026\\2nd sem - GCD - Procesamiento del Lenguaje Natural\\Trabajo_NLP_2026\\submissions",
+                "--extract-nested-zips",
+                "--no-convert",
+                "--model", "google/gemini-3-pro-preview",
+                "--reference", "project_2026_teacher.ipynb",
+                "--rubric", "rubric.txt",
+                "--example", "example.txt",
+                "--files-regex", ".*\\.(ipynb|html)$",
+                "--keep-prompt"
+            ]
+        },
+        {
             "name": "ADS: P1 - SADC",
             "type": "python",
             "request": "launch",
