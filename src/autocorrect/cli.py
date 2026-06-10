@@ -91,10 +91,15 @@ def resolve_moodle_column(fieldnames, requested, role, required=True):
 
 
 def load_project_dotenv():
-    """Load .env from the ai4exams repo root and its parent, regardless of cwd."""
-    repo_root = Path(__file__).resolve().parents[3]
-    for folder in (repo_root, repo_root.parent):
-        load_dotenv(folder / ".env")
+    """Load .env files from the current workspace and package parents."""
+    seen = set()
+    for start in (Path.cwd(), Path(__file__).resolve()):
+        folder = start if start.is_dir() else start.parent
+        for candidate in (folder, *folder.parents):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            load_dotenv(candidate / ".env")
 
 def unzip_submissions(session_folder, students_dir):
     """Unzips all student submissions."""
