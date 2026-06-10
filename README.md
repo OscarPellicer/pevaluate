@@ -12,6 +12,12 @@ Install the package in editable mode from this repository:
 pip install -e .
 ```
 
+Install the Playwright browser binaries used for HTML-to-PDF export:
+
+```bash
+playwright install chromium
+```
+
 Create a `.env` file with your OpenRouter API key:
 
 ```env
