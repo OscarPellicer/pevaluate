@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv",
     "tenacity",
     "jupyter",
+    "matplotlib",
     "nbconvert",
     "python-docx",
     "pypdf",
