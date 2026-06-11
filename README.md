@@ -4,6 +4,12 @@
 
 The package installs as `pevaluate`. The older `autocorrect` command is still available as a CLI alias.
 
+## AI4Exams ecosystem
+
+Pevaluate is part of the AI4Exams ecosystem together with `ptestgen`, `pexams`, and the planned `pstudio` visual orchestration layer.
+
+![AI4Exams ecosystem](https://raw.githubusercontent.com/OscarPellicer/ptestgen/refs/heads/main/media/ai4exams_ecosystem.png)
+
 ## Installation
 
 Install the package in editable mode from this repository:
