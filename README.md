@@ -99,6 +99,19 @@ pevaluate "my_assignment" \
   --prefer-extensions ".ipynb;.html"
 ```
 
+For a single submission file, pass the file directly. Use `--output-dir` when you want prompts and feedback somewhere other than the file's parent folder:
+
+```bash
+pevaluate "path/to/Memoria_TFG.pdf" \
+  --output-dir "generated/tfg_evaluation" \
+  --rubric rubric.txt \
+  --example example.txt \
+  --no-reference \
+  --include-images \
+  --keep-prompt \
+  --no-evaluate
+```
+
 By default, if both `.ipynb` and `.html` exist for the same submission, `pevaluate` grades the `.ipynb` and reports the skipped `.html`. HTML artifacts are cleaned from `.ipynb`, `.md`, and `.html` content before prompting. Disable this only when those artifacts are relevant to grading:
 
 ```bash
@@ -106,6 +119,45 @@ pevaluate "my_assignment" --no-cleanup-html
 ```
 
 `--not-cleanup-html` is accepted as an alias.
+
+If submissions include relevant visual material in `.pdf`, `.pptx`, `.docx`, `.md`, `.html`, or direct image files, opt in to sending extracted images to the LLM:
+
+```bash
+pevaluate "my_assignment" \
+  --no-unzip \
+  --no-convert \
+  --no-reference \
+  --files-regex ".*\.(pdf|pptx|docx|md|html|png|jpg)$" \
+  --include-images
+```
+
+Images are deduplicated by content hash before sending, which avoids repeatedly attaching common logos or reused slide assets. Use `--max-images` to cap attachments per submission, or `--no-dedupe-images` when repeated images are intentionally meaningful.
+
+Use `--keep-prompt` to save the exact prompt as Markdown in `prompts/`. When `--include-images` is enabled, the prompt Markdown includes local image references and the extracted images are written to a sibling prompt asset folder. For PDFs, `pevaluate` uses `pymupdf4llm.to_markdown` by default with `header=False`, `footer=False`, `use_ocr=False`, and `force_text=True`, so figures are referenced near their extracted position in the Markdown instead of being collected at the end. Use `--markdown-config` with a JSON object or JSON file path to override converter options. Use `--no-evaluate` to prepare prompts and print approximate token consumption without calling the model.
+
+Document inputs are first converted to a Markdown intermediate representation:
+
+| Input | Markdown pipeline | Image handling |
+| :--- | :--- | :--- |
+| PDF | `pymupdf4llm.to_markdown(..., header=False, footer=False, use_ocr=False, force_text=True)` using the modern layout backend by default; optional `pdf_backend="legacy"` only as an escape hatch | Extracted to relative Markdown references; only attached to the LLM with `--include-images`. |
+| DOCX | `python-docx` paragraphs/tables/media | Extracted to relative Markdown references; only attached with `--include-images`. |
+| PPTX | `python-pptx` from `OscarPellicer/python-pptx`, with package-XML fallback | Extracted to relative Markdown references; only attached with `--include-images`. |
+| MD/HTML | Native text with local/data image reference rewriting | References are kept/rebased; only attached with `--include-images`. |
+| IPYNB | `nbconvert.MarkdownExporter` | Notebook Markdown output is used; embedded images are not sent unless extracted by the selected path. |
+| Direct image | Markdown image reference | Only attached with `--include-images`. |
+| TXT/code/SQL | UTF-8 text | No image extraction. |
+
+The modern PyMuPDF4LLM layout backend usually gives better Markdown and is the recommended default. If you explicitly prefer the older RAG backend for a particular file, you can use a JSON config file like:
+
+```json
+{
+  "pdf_backend": "legacy",
+  "ignore_graphics": true,
+  "image_size_limit": 0.08
+}
+```
+
+The legacy backend exposes `ignore_graphics`, `image_size_limit`, and `graphics_limit`, but it may produce worse layout. `pevaluate` also normalizes common PDF ligatures and control-code artifacts after extraction, including `fi`/`fl` substitutions.
 
 ## Rubric File
 
@@ -320,7 +372,7 @@ pevaluate test-open --real-llm --output-dir generated/open_answer_eval_real
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `session_folder` | Folder containing the assignment materials. | required |
+| `session_folder` | Folder containing the assignment materials, or a single submission file. | required |
 | `--model` | OpenRouter model. | `google/gemini-3.1-pro-preview` |
 | `--rubric` | Rubric file in the session folder. | `rubric.txt` |
 | `--example` | Example feedback file in the session folder. | `example.txt` |
@@ -329,17 +381,24 @@ pevaluate test-open --real-llm --output-dir generated/open_answer_eval_real
 | `--files-regex` | Student files to grade. | `.*\.ipynb$` |
 | `--prefer-extensions` | Extension priority for duplicate submission files. | `.ipynb;.html` |
 | `--students-dir` | Directory containing unpacked student submissions. | `<session_folder>/students` |
+| `--output-dir` | Output/session folder for single-file inputs. | input file parent |
 | `--extract-nested-zips` | Extract zip files found inside `students-dir`. | false |
 | `--no-cleanup-html` | Keep HTML styles/scripts/images in prompts. | false |
-| `--keep-prompt` | Save prompts to `prompts/`. | false |
+| `--include-images` | Extract supported images and attach them to the LLM request. | false |
+| `--no-dedupe-images` | Keep duplicate extracted images instead of deduplicating by content hash. | false |
+| `--max-images` | Maximum extracted images attached per LLM request. Use `0` for no limit. | `20` |
+| `--markdown-config` | JSON object or JSON file path with document-to-Markdown converter options. PDF options are passed to `pymupdf4llm.to_markdown`. | empty |
+| `--keep-prompt` | Save prompts as Markdown to `prompts/`, with image assets when `--include-images` is used. | false |
+| `--no-evaluate` | Prepare prompts and token estimates without calling the LLM. | false |
 | `--student` | Filter submissions by filename text. | empty |
 | `--no-unzip` | Skip Moodle zip extraction. | false |
 | `--no-convert` | Skip notebook-to-Markdown conversion. | false |
-| `--no-grade` | Skip LLM grading. | false |
+| `--no-grade` | Skip grading entirely, including prompt preparation. | false |
 
 ## Notes
 
 - Prompt size is printed for each submission in characters and approximate tokens.
+- PDF extraction uses PyMuPDF4LLM for Markdown/layout-aware output. Pandoc remains useful for DOCX/HTML/Markdown workflows, but it is not used for PDF extraction because it does not provide comparable PDF layout recovery.
 - HTML sanitization removes `<style>`, `<script>`, embedded images, SVGs, comments, and other noisy artifacts.
 - Prompt files are saved in `prompts/` when `--keep-prompt` is used.
 - Feedback files are saved in `feedback/` as YAML and can be compiled into a Moodle marks CSV with `pevaluate moodle-csv`.
