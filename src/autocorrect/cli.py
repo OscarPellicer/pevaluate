@@ -10,6 +10,7 @@ Usage:
 import argparse
 import csv
 import html
+import json
 import os
 import glob
 import shutil
@@ -271,6 +272,52 @@ def get_llm_response(client, model, messages):
         model=model,
         messages=messages,
     )
+
+def _limit_images(images, max_images):
+    if max_images is None or max_images <= 0:
+        return images, 0
+    return images[:max_images], max(0, len(images) - max_images)
+
+def _image_extension(mime_type):
+    return {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/bmp": ".bmp",
+    }.get(mime_type, ".img")
+
+def build_multimodal_user_content(prompt, images):
+    if not images:
+        return prompt
+    content = [{"type": "text", "text": prompt}]
+    for image in images:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": image.data_url},
+        })
+    return content
+
+def save_prompt_markdown(prompt_path, prompt, images=None):
+    prompt_path = Path(prompt_path)
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text("# pevaluate LLM Prompt\n\n" + prompt.rstrip() + "\n", encoding="utf-8")
+
+def parse_markdown_config(value):
+    if not value:
+        return {}
+    candidate = Path(value)
+    if candidate.exists():
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    return json.loads(value)
+
+def clean_asset_dir(path):
+    path = Path(path)
+    if not path.exists():
+        return
+    for item in path.iterdir():
+        if item.is_file():
+            item.unlink()
 
 def resolve_reference_file(session_folder, students_dir, ref_name):
     """
@@ -697,27 +744,32 @@ def moodle_csv_main(argv):
 
 def grade_submissions(session_folder, students_dir, args):
     """Grades all student submissions using an LLM."""
-    print("Starting LLM-based grading...")
+    if args.no_evaluate:
+        print("Preparing grading prompts without calling the LLM...")
+    else:
+        print("Starting LLM-based grading...")
     load_project_dotenv()
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY not found in .env file.")
-        return
-    if openai is None:
-        print("Error: openai package not installed. Install it to grade submissions with an LLM.")
-        return
+    client = None
+    if not args.no_evaluate:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            print("Error: OPENROUTER_API_KEY not found in .env file.")
+            return
+        if openai is None:
+            print("Error: openai package not installed. Install it to grade submissions with an LLM.")
+            return
 
-    client = openai.OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+        client = openai.OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
 
     # Load Rubric
     rubric_path = os.path.join(session_folder, args.rubric)
     if not os.path.exists(rubric_path):
         print(f"Error: Rubric file not found at {rubric_path}")
         # If not found, try to look for a file starting with "Rubri" or "rubri" in the session folder
-        rubrics = glob.glob(os.path.join(session_folder, '[Rr]ubri*.txt'))
+        rubrics = glob.glob(os.path.join(session_folder, '[Rr]ubri*.*'))
         if rubrics:
              rubric_path = rubrics[0]
              print(f"Found alternative rubric file: {rubric_path}")
@@ -729,22 +781,34 @@ def grade_submissions(session_folder, students_dir, args):
 
     # Load Example
     example_path = os.path.join(session_folder, args.example)
+    found_example= True
     if not os.path.exists(example_path):
-        print(f"Error: Example feedback file not found at {example_path}")
+        print(f"Warning: Example feedback file not found at {example_path}")
         # If not found, try to look for a file starting with "example" in the session folder
-        examples = glob.glob(os.path.join(session_folder, '[Ee]xample*.txt'))
+        examples = glob.glob(os.path.join(session_folder, '[Ee]xample*.*'))
         if examples:
              example_path = examples[0]
              print(f"Found alternative example file: {example_path}")
         else:
-             return
-    print(f"Using example review: {example_path}")
-    with open(example_path, 'r', encoding='utf-8') as f:
-        example_review = f.read()
+             found_example = False
+
+    if found_example:
+        print(f"Using example review: {example_path}")
+        with open(example_path, 'r', encoding='utf-8') as f:
+            example_review = f.read()
+    else:
+        print("No example feedback will be included in the prompt.")
+        example_review = "[No example feedback provided]"
+
+    markdown_config = parse_markdown_config(getattr(args, "markdown_config", None))
+    prompts_dir = os.path.join(session_folder, 'prompts')
 
     reference_content = ""
+    reference_images = []
+    image_warnings = []
     if args.no_reference or not args.reference or args.reference.lower() in ("none", "null", "no"):
         print("No reference file will be included in the prompt.")
+        reference_content = "[No reference content provided]"
     else:
         ref_paths = args.reference.split(';')
         for i, ref_path in enumerate(ref_paths):
@@ -752,27 +816,47 @@ def grade_submissions(session_folder, students_dir, args):
 
             if not resolved_path:
                 print(f"Error: Reference file '{ref_path}' not found.")
+                reference_content = "[No reference content provided]"
                 return
 
             print(f"Using reference file {i+1}: {resolved_path}")
-            content = utils.read_file_content(resolved_path, cleanup_html=not args.no_cleanup_html)
-            reference_content += f"\n\n--- Reference File {i+1} ({os.path.basename(resolved_path)}) ---\n{content}\n"
+            reference_assets_dir = os.path.join(prompts_dir, f"reference_{i + 1}_images")
+            if args.include_images:
+                clean_asset_dir(reference_assets_dir)
+            extraction = utils.read_file_markdown(
+                resolved_path,
+                cleanup_html=not args.no_cleanup_html,
+                image_output_dir=reference_assets_dir if args.include_images else None,
+                image_reference_dir=prompts_dir if args.include_images else None,
+                markdown_config=markdown_config,
+                dedupe=not args.no_dedupe_images,
+            )
+            reference_content += f"\n\n--- Reference File {i+1} ({os.path.basename(resolved_path)}) ---\n{extraction.markdown}\n"
+            reference_images.extend(extraction.images)
+            image_warnings.extend(extraction.warnings)
+            if args.include_images:
+                print(f"Extracted {len(extraction.images)} image(s) from reference file {i+1}.")
 
     # Find Student Files
-    student_files = []
-    regex = re.compile(args.files_regex)
-    
-    for root, dirs, files in os.walk(students_dir):
-        for file in files:
-            if regex.match(file):
-                student_files.append(os.path.join(root, file))
+    single_file = getattr(args, "single_file", None)
+    if single_file:
+        student_files = [single_file]
+        print(f"Using single submission file: {single_file}")
+    else:
+        student_files = []
+        regex = re.compile(args.files_regex)
 
-    preferred_extensions = [
-        ext.strip().lower() if ext.strip().startswith(".") else f".{ext.strip().lower()}"
-        for ext in args.prefer_extensions.split(";")
-        if ext.strip()
-    ]
-    student_files = select_preferred_student_files(student_files, students_dir, preferred_extensions)
+        for root, dirs, files in os.walk(students_dir):
+            for file in files:
+                if regex.match(file):
+                    student_files.append(os.path.join(root, file))
+
+        preferred_extensions = [
+            ext.strip().lower() if ext.strip().startswith(".") else f".{ext.strip().lower()}"
+            for ext in args.prefer_extensions.split(";")
+            if ext.strip()
+        ]
+        student_files = select_preferred_student_files(student_files, students_dir, preferred_extensions)
 
     # Filter by student name if provided
     if args.student:
@@ -797,8 +881,25 @@ def grade_submissions(session_folder, students_dir, args):
         student_name = get_student_name_from_path(student_file_path)
         prompt_slug = get_submission_output_slug(student_name, student_file_path)
         print(f"Grading submission for {student_name} ({os.path.basename(student_file_path)})...")
-        
-        student_content = utils.read_file_content(student_file_path, cleanup_html=not args.no_cleanup_html)
+
+        prompt_assets_dir = os.path.join(prompts_dir, f"prompt_{prompt_slug}_images")
+        if args.include_images:
+            clean_asset_dir(prompt_assets_dir)
+        extraction = utils.read_file_markdown(
+            student_file_path,
+            cleanup_html=not args.no_cleanup_html,
+            image_output_dir=prompt_assets_dir if args.include_images else None,
+            image_reference_dir=prompts_dir if args.include_images else None,
+            markdown_config=markdown_config,
+            dedupe=not args.no_dedupe_images,
+        )
+        # You need to grade the submission according to the rubric. Report the marks for each question and the total mark. The final feedback should be brief, just the marks for each exercise and any maximum a sentence for every exercise where points were deducted. The rubric may include not only the points for each question, but also some examples of specific reviews that should be given to the students for specific response.
+        student_content = extraction.markdown
+        student_images = extraction.images
+        current_image_warnings = list(image_warnings)
+        current_image_warnings.extend(extraction.warnings)
+        if args.include_images:
+            print(f"Extracted {len(student_images)} image(s) from student submission.")
         
         reference_section = ""
         if reference_content:
@@ -810,49 +911,75 @@ Here is the reference solution:
 """
 
         prompt = \
-f"""You are a helpful assistant that grades University assignments. You are given a rubric, an example feedback (optional), and a student submission to grade. The rubric may include not only the points for each question, but also some examples of specific reviews that should be given to the students for specific response. You need to grade the submission according to the rubric. Report the marks for each question and the total mark. The final feedback should be brief, just the marks for each exercise and any maximum a sentence for every exercise where points were deducted. Provide the feedback in the same language as the ones the students used to answer the questions.
+f"""You are a helpful assistant that grades University assignments. You are given the student submission (mandatory), a rubric (mandatory), an example feedback (optional), a reference solution (optional), and the images extracted from the submission (optional). You need to grade the submission according to the rubric. Provide the feedback in the same language as the ones the student(s) used to answer the questions.
+
+Here is the student's submission to grade:
+
+{student_content}
+
+--------------------------------
+
+Here is the rubric:
+
+{rubric}
+
+--------------------------------
+
+Here is an example of review (optional, note that the exercises might be completely different, this is just an example of the expected format):
+
+{example_review}
+
+--------------------------------
+
+Here is the reference solution (if provided):
+
+{reference_section}
+
+--------------------------------
 
 Return only valid YAML with this schema:
 
 students:
   - full_name: "Nombre Apellido Apellido"
 feedback: |
-  Texto breve de retroalimentación para Moodle.
+  Feedback comments for the student, can be multiline.
 mark: 0.0
 
-The `students` list must include all members of the submitted group. The `mark` must be the final numeric mark from 0 to 10.
+The `students` list must include all members of the work group (if more than one). The `mark` must be the final numeric mark from 0 to 10.
 
-Here is the rubric:
-
-{rubric}
---------------------------------
-
-{reference_section}
-
-Here is the student's submission to grade:
-
-{student_content}
---------------------------------
-
-Here is an example of review (optional, note that the exercises might be completely different, this is just an example of the expected format):
-
-{example_review}
---------------------------------
-
-Please provide the feedback now.
+Please provide the feedback now:
 """
+        images_for_model = []
+        if args.include_images:
+            images_for_model = reference_images + student_images
+            if not args.no_dedupe_images:
+                images_for_model, duplicate_count = utils.dedupe_images(images_for_model)
+                if duplicate_count:
+                    current_image_warnings.append(f"Removed {duplicate_count} duplicate image(s) across reference and student files.")
+            images_for_model, omitted_count = _limit_images(images_for_model, args.max_images)
+            if omitted_count:
+                current_image_warnings.append(f"Omitted {omitted_count} image(s) because --max-images is {args.max_images}.")
+            if not images_for_model and (student_images or reference_images):
+                prompt += "\nImage extraction was requested, but no supported images were attached after filtering.\n"
+
         estimated_tokens, token_method = estimate_prompt_tokens(prompt)
         print(
             f"Prompt size for {student_name}: {len(prompt):,} chars, "
             f"~{estimated_tokens:,} tokens ({token_method})."
         )
+        if args.include_images:
+            print(f"Sending {len(images_for_model)} image(s) to the LLM for {student_name}.")
+            for warning in current_image_warnings:
+                print(f"Image warning: {warning}")
         if args.keep_prompt:
-            prompts_dir = os.path.join(session_folder, 'prompts')
             os.makedirs(prompts_dir, exist_ok=True)
-            prompt_file = os.path.join(prompts_dir, f"prompt_{prompt_slug}.txt")
-            with open(prompt_file, 'w', encoding='utf-8') as f:
-                f.write(prompt)
+            prompt_file = os.path.join(prompts_dir, f"prompt_{prompt_slug}.md")
+            save_prompt_markdown(prompt_file, prompt, images_for_model if args.include_images else [])
             print(f"Prompt for {student_name} saved to {prompt_file}")
+
+        if args.no_evaluate:
+            print(f"Skipping LLM evaluation for {student_name} because --no-evaluate was set.")
+            continue
 
         try:
             response = get_llm_response(
@@ -860,7 +987,7 @@ Please provide the feedback now.
                 args.model,
                 [
                     {"role": "system", "content": "You are a teaching assistant for a data science course."},
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": build_multimodal_user_content(prompt, images_for_model)},
                 ]
             )
             feedback = response.choices[0].message.content
@@ -893,10 +1020,11 @@ def main():
         return
 
     parser = argparse.ArgumentParser(description="Automate the correction pipeline for assignment submissions.")
-    parser.add_argument("session_folder", help="The path to the assignment/session folder.")
+    parser.add_argument("session_folder", help="The path to the assignment/session folder, or a single submission file.")
     parser.add_argument("--no-unzip", action="store_true", help="Skip the unzipping step.")
     parser.add_argument("--no-convert", action="store_true", help="Skip the batch notebook to markdown conversion step.")
-    parser.add_argument("--no-grade", action="store_true", help="Skip the LLM-based grading step.")
+    parser.add_argument("--no-grade", action="store_true", help="Skip the LLM-based grading step entirely, including prompt preparation.")
+    parser.add_argument("--no-evaluate", action="store_true", help="Prepare inputs, print token estimates, and save prompts when requested, but do not call the LLM.")
     parser.add_argument("--model", default="google/gemini-3.1-pro-preview", help="The model to use for grading on OpenRouter.")
     parser.add_argument("--student", help="Filter to grade only a specific student's submission (part of the filename). Can be a semicolon-separated list.")
     
@@ -910,12 +1038,33 @@ def main():
     parser.add_argument("--remove-files-regex", help="Regex to remove specific files from the students directory after unzipping.")
     parser.add_argument("--keep-prompt", action="store_true", help="Save the grading prompt to a file for debugging.")
     parser.add_argument("--no-cleanup-html", "--not-cleanup-html", dest="no_cleanup_html", action="store_true", help="Disable removal of HTML style/script/image artifacts from notebooks, markdown, and HTML files.")
+    parser.add_argument("--include-images", action="store_true", help="Extract images from supported files and attach them to the LLM request.")
+    parser.add_argument("--no-dedupe-images", action="store_true", help="Do not remove duplicate extracted images before sending them to the LLM.")
+    parser.add_argument("--max-images", type=int, default=20, help="Maximum extracted images to attach per LLM request. Use 0 for no limit.")
+    parser.add_argument("--markdown-config", help="JSON object or path to a JSON file with document-to-Markdown converter options. For PDFs these are passed to pymupdf4llm.to_markdown.")
     parser.add_argument("--students-dir", help="Directory containing already unpacked student submissions. Defaults to <session_folder>/students.")
     parser.add_argument("--extract-nested-zips", action="store_true", help="Extract zip files found inside the students directory before conversion/grading.")
+    parser.add_argument("--output-dir", help="Output/session folder for single-file inputs. Defaults to the input file's parent folder.")
 
     args = parser.parse_args()
 
-    session_folder = args.session_folder
+    input_path = os.path.abspath(args.session_folder)
+    single_file = os.path.isfile(input_path)
+    if single_file:
+        args.single_file = input_path
+        if not args.students_dir:
+            args.students_dir = os.path.dirname(input_path)
+        session_folder = args.output_dir if args.output_dir else os.path.dirname(input_path)
+        os.makedirs(session_folder, exist_ok=True)
+        args.no_unzip = True
+        args.no_convert = True
+        print(f"Single-file input detected: {input_path}")
+        print(f"Using output/session folder: {session_folder}")
+    else:
+        if args.output_dir:
+            print("Warning: --output-dir is currently only used for single-file inputs; ignoring it for folder input.")
+        args.single_file = None
+        session_folder = args.session_folder
     students_dir = args.students_dir if args.students_dir else os.path.join(session_folder, 'students')
     
     if not args.no_unzip:

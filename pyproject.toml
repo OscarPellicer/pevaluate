@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pevaluate"
-version = "0.1.1"
+version = "0.1.7"
 description = "Automated correction pipeline for JupyterLab sessions using LLMs"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "openai",
+    "openai>=1.0.0",
     "python-dotenv",
     "tenacity",
     "jupyter",
@@ -19,7 +19,9 @@ dependencies = [
     "playwright",
     "pymdown-extensions",
     "python-docx",
+    "python-pptx @ git+https://github.com/OscarPellicer/python-pptx.git",
     "pypdf",
+    "pymupdf4llm",
     "PyYAML"
 ]
 
