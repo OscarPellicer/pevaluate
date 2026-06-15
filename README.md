@@ -141,7 +141,7 @@ Document inputs are first converted to a Markdown intermediate representation:
 | :--- | :--- | :--- |
 | PDF | `pymupdf4llm.to_markdown(..., header=False, footer=False, use_ocr=False, force_text=True)` using the modern layout backend by default; optional `pdf_backend="legacy"` only as an escape hatch | Extracted to relative Markdown references; only attached to the LLM with `--include-images`. |
 | DOCX | `python-docx` paragraphs/tables/media | Extracted to relative Markdown references; only attached with `--include-images`. |
-| PPTX | `python-pptx` from `OscarPellicer/python-pptx`, with package-XML fallback | Extracted to relative Markdown references; only attached with `--include-images`. |
+| PPTX | PyPI `python-pptx`, with package-XML fallback | Extracted to relative Markdown references; only attached with `--include-images`. |
 | MD/HTML | Native text with local/data image reference rewriting | References are kept/rebased; only attached with `--include-images`. |
 | IPYNB | `nbconvert.MarkdownExporter` | Notebook Markdown output is used; embedded images are not sent unless extracted by the selected path. |
 | Direct image | Markdown image reference | Only attached with `--include-images`. |
@@ -158,6 +158,12 @@ The modern PyMuPDF4LLM layout backend usually gives better Markdown and is the r
 ```
 
 The legacy backend exposes `ignore_graphics`, `image_size_limit`, and `graphics_limit`, but it may produce worse layout. `pevaluate` also normalizes common PDF ligatures and control-code artifacts after extraction, including `fi`/`fl` substitutions.
+
+`pevaluate` depends on the standard PyPI `python-pptx` package so releases can be uploaded to PyPI. For local work with PPTX files that need improved equation/MathML extraction, you can manually replace it with Oscar's fork after installing `pevaluate`:
+
+```bash
+pip install --force-reinstall --no-deps git+https://github.com/OscarPellicer/python-pptx.git
+```
 
 ## Rubric File
 
