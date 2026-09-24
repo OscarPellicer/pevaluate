@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import base64
 import csv
 import html
@@ -15,6 +15,12 @@ from typing import Dict, Optional
 import yaml
 from dotenv import load_dotenv
 
+
+
+def openrouter_extra_body(model_name):
+    """Gemini Flash models on OpenRouter reason by default and cannot disable it; the
+    minimal effort avoids paying for (and waiting on) reasoning tokens."""
+    return {"reasoning": {"effort": "minimal"}} if "flash" in str(model_name).lower() else {}
 
 def load_project_dotenv():
     """Load .env files from the current workspace and package parents."""
@@ -166,6 +172,7 @@ def _evaluate_with_llm(client, model: str, prompt: str, crop_path: str) -> dict:
         ],
         "response_format": {"type": "json_object"},
     }
+    params["extra_body"] = openrouter_extra_body(params.get("model"))
     response = client.chat.completions.create(**params)
     content = response.choices[0].message.content
     return _parse_json_response(content)
@@ -1036,6 +1043,7 @@ def run_post_analysis(scores_csv: str, output_dir: str, model: str = "google/gem
     )
     response = client.chat.completions.create(
         model=model,
+        extra_body=openrouter_extra_body(model),
         messages=[
             {"role": "system", "content": "You help teachers analyze graded exam responses."},
             {"role": "user", "content": prompt},

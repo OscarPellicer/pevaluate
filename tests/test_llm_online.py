@@ -19,7 +19,7 @@ def _requires_llm():
 def test_open_answer_smoke_pipeline_with_real_llm(tmp_path):
     _requires_llm()
 
-    model = os.getenv("PEVALUATE_LLM_TEST_MODEL", "google/gemini-3-flash-preview")
+    model = os.getenv("PEVALUATE_LLM_TEST_MODEL", "google/gemini-3.8-flash")
     output_dir = Path(run_open_answer_smoke_test(str(tmp_path), real_llm=True, model=model))
 
     scores_csv = output_dir / "open_scores.csv"
