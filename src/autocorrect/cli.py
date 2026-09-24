@@ -259,6 +259,12 @@ def get_submission_output_slug(student_name, student_file_path, structured_feedb
 
     return f"{slugify_filename(base_name)}_{get_submission_source_id(student_file_path)}"
 
+
+def openrouter_extra_body(model_name):
+    """Gemini Flash models on OpenRouter reason by default and cannot disable it; the
+    minimal effort avoids paying for (and waiting on) reasoning tokens."""
+    return {"reasoning": {"effort": "minimal"}} if "flash" in str(model_name).lower() else {}
+
 def is_retryable_api_error(e):
     if isinstance(e, (openai.APIConnectionError, openai.RateLimitError)):
         return True
@@ -271,6 +277,7 @@ def get_llm_response(client, model, messages):
     return client.chat.completions.create(
         model=model,
         messages=messages,
+        extra_body=openrouter_extra_body(model),
     )
 
 def _limit_images(images, max_images):
