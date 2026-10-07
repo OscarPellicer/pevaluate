@@ -60,7 +60,11 @@ def _resolve_crop_path(row: dict, index_csv: str) -> str:
     crop_path = row.get("crop_path", "")
     if os.path.isabs(crop_path):
         return crop_path
-    return os.path.abspath(os.path.join(os.path.dirname(index_csv), crop_path))
+    relative_to_index = os.path.abspath(os.path.join(os.path.dirname(index_csv), crop_path))
+    # Older pexams versions wrote paths relative to the working directory of the correction.
+    if not os.path.exists(relative_to_index) and os.path.exists(crop_path):
+        return os.path.abspath(crop_path)
+    return relative_to_index
 
 
 def _image_data_url(path: str) -> str:
@@ -319,9 +323,9 @@ def evaluate_open_responses(
 
         load_project_dotenv()
         api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY not found. Use --dry-run to prepare prompts without grading.")
-        client = openai.OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+        # Without a key, responses already graded in the YAML (e.g. after manual edits) can still
+        # be reused to rebuild the reports; the error is raised only if something needs grading.
+        client = openai.OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key) if api_key else None
 
     result_rows = []
     for row in rows:
@@ -362,6 +366,8 @@ def evaluate_open_responses(
             status = "pending"
         else:
             try:
+                if client is None:
+                    raise RuntimeError("OPENROUTER_API_KEY not found. Use --dry-run to prepare prompts without grading.")
                 result = _coerce_result(_evaluate_with_llm(client, model, prompt, crop_path), base_result)
                 status = "graded"
             except Exception as e:
@@ -455,6 +461,44 @@ def _load_mc_feedback_context(mc_correction_dir: Optional[str]) -> Dict[str, dic
         for path in Path(images_dir).glob("*.png"):
             context[path.stem] = {"student_id": path.stem, "image_path": str(path)}
     return context
+
+
+def _to_float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _student_summary_table(mc_row: dict, student_rows: list[dict]) -> str:
+    """Summary of the student's marks (multiple choice + each open answer + total) for the
+    first page of the per-student feedback PDF."""
+    lines = []
+    total, total_max = 0.0, 0.0
+    mc_score, mc_max = _to_float(mc_row.get("score")), _to_float(mc_row.get("max_score"))
+    if mc_score is not None and mc_max:
+        detail = ""
+        if mc_row.get("correct", "") != "":
+            detail = f" ({mc_row.get('correct')} correct, {mc_row.get('incorrect')} incorrect, {mc_row.get('na')} blank)"
+        lines.append(f"<tr><td>Multiple choice{html.escape(detail)}</td><td>{mc_score:.2f}</td><td>{mc_max:.2f}</td></tr>")
+        total, total_max = total + mc_score, total_max + mc_max
+    for row in student_rows:
+        score, max_score = _to_float(row.get("score")), _to_float(row.get("max_score"))
+        if max_score is None:
+            continue
+        shown = f"{score:.2f}" if score is not None else "pending"
+        lines.append(f"<tr><td>Question {html.escape(str(row.get('question_id', '')))}</td><td>{shown}</td><td>{max_score:.2f}</td></tr>")
+        total, total_max = total + (score or 0.0), total_max + max_score
+    if not lines:
+        return ""
+    mark = f"{10 * total / total_max:.2f}/10" if total_max else ""
+    lines.append(f"<tr class='total'><td>Total</td><td>{total:.2f}</td><td>{total_max:.2f}</td></tr>")
+    return (
+        "<div class='section'><h2>Summary</h2>"
+        "<table class='summary-table'><tr><th>Part</th><th>Score</th><th>Max</th></tr>"
+        + "".join(lines)
+        + f"</table><p><strong>Mark: {mark}</strong></p></div>"
+    )
 
 
 def _student_totals(graded_rows: list[dict]) -> list[dict]:
@@ -954,6 +998,10 @@ def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correcti
     .md { background: #f7f7f7; padding: 10px; border-left: 3px solid #8aa0b6; }
     .md p { margin-top: 0; }
     img { max-width: 100%; height: auto; }
+    .summary-table { border-collapse: collapse; margin: 8px 0; }
+    .summary-table td, .summary-table th { border-bottom: 1px solid #e2e8f0; padding: 4px 12px; text-align: right; }
+    .summary-table td:first-child, .summary-table th:first-child { text-align: left; }
+    .summary-table tr.total td { font-weight: 700; }
     """
     html_paths = []
     for student_id, student_rows in grouped.items():
@@ -969,6 +1017,7 @@ def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correcti
         parts.append(f"<div class='muted'>Student ID: {html.escape(student_id)}</div>")
         parts.append("</div>")
         mc_row = mc_feedback.get(student_id, {})
+        parts.append(_student_summary_table(mc_row, student_rows))
         if mc_row and mc_row.get("image_path"):
             parts.append("<div class='section'>")
             parts.append("<h2>Corrected Multiple-Choice Template</h2>")
