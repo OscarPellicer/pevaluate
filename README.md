@@ -340,6 +340,7 @@ Useful flags:
 | `--post-analysis` | Analyze graded responses, summarize typical errors, and suggest a revised rubric in `post_analysis.yaml`. |
 | `--re-evaluate` | Run a second grading pass in a sibling `reevaluation/` folder after post-analysis. First-pass artifacts are kept. |
 | `--mc-correction-dir` | Optional pexams correction directory. Adds corrected MC template PNGs to student PDFs and includes `stats_report.html` in the global report when present. |
+| `--student-converted-response` | Also show the transcribed response in per-student PDFs. Off by default (students see their crop, score and feedback); the global report always includes it. |
 
 Outputs include:
 
