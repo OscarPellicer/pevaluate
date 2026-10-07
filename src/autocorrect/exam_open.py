@@ -717,6 +717,7 @@ def generate_open_response_report(
     output_dir: str,
     title: str = "Open-Answer Report",
     mc_correction_dir: Optional[str] = None,
+    student_converted_response: bool = False,
 ) -> str:
     rows = _read_scores(scores_csv)
     os.makedirs(output_dir, exist_ok=True)
@@ -920,11 +921,13 @@ def generate_open_response_report(
     Path(html_path).write_text("\n".join(parts), encoding="utf-8")
     pdf_path = os.path.join(output_dir, "open_responses_report.pdf")
     _write_pdf_from_html(html_path, pdf_path)
-    generate_student_feedback_pdfs(scores_csv, output_dir, mc_correction_dir=mc_correction_dir)
+    generate_student_feedback_pdfs(scores_csv, output_dir, mc_correction_dir=mc_correction_dir,
+                                   include_converted_response=student_converted_response)
     return html_path
 
 
-def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correction_dir: Optional[str] = None) -> str:
+def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correction_dir: Optional[str] = None,
+                                   include_converted_response: bool = False) -> str:
     rows = _read_scores(scores_csv)
     grouped: Dict[str, list[dict]] = {}
     for row in rows:
@@ -1033,8 +1036,11 @@ def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correcti
             parts.append(f"<div class='score-pill'>{html.escape(row.get('score', ''))}/{html.escape(row.get('max_score', ''))}</div>")
             parts.append(img(row.get("crop_path", "")))
             parts.append(f"<div class='feedback'><strong>Feedback:</strong> {html.escape(row.get('feedback', ''))}</div>")
-            parts.append("<h3>Converted response</h3>")
-            parts.append(f"<div class='md'>{render_md(row.get('response_markdown', ''))}</div>")
+            # The transcription is mostly useful to the teacher (cheaper text-only re-grading),
+            # so students only get it when explicitly requested.
+            if include_converted_response:
+                parts.append("<h3>Converted response</h3>")
+                parts.append(f"<div class='md'>{render_md(row.get('response_markdown', ''))}</div>")
             parts.append("</div>")
         parts.append("</div>")
         parts.append("</body></html>")
@@ -1345,6 +1351,7 @@ def main(argv: Optional[list[str]] = None):
     parser.add_argument("--post-analysis", action="store_true", help="Analyze graded responses and suggest rubric refinements.")
     parser.add_argument("--re-evaluate", action="store_true", help="Reserved for regrading with a revised rubric after post-analysis.")
     parser.add_argument("--mc-correction-dir", help="Optional pexams correction-results directory to merge multiple-choice feedback into per-student PDFs.")
+    parser.add_argument("--student-converted-response", action="store_true", help="Also include the transcribed (converted) response in the per-student feedback PDFs. Off by default; the global report always includes it.")
     args = parser.parse_args(argv)
 
     output_csv = evaluate_open_responses(
@@ -1356,7 +1363,8 @@ def main(argv: Optional[list[str]] = None):
         keep_prompts=args.keep_prompts,
         force_regrade=args.force_regrade,
     )
-    report_path = generate_open_response_report(output_csv, args.output_dir, mc_correction_dir=args.mc_correction_dir)
+    report_path = generate_open_response_report(output_csv, args.output_dir, mc_correction_dir=args.mc_correction_dir,
+                                                student_converted_response=args.student_converted_response)
     print(f"Open-answer scores saved to: {output_csv}")
     print(f"Open-answer report saved to: {report_path}")
     if args.post_analysis:
@@ -1378,7 +1386,8 @@ def main(argv: Optional[list[str]] = None):
             force_regrade=args.force_regrade,
             model_input_dir=os.path.join(args.output_dir, "model_inputs"),
         )
-        reeval_report = generate_open_response_report(reeval_csv, reeval_dir, title="Open-Answer Re-Evaluation Report", mc_correction_dir=args.mc_correction_dir)
+        reeval_report = generate_open_response_report(reeval_csv, reeval_dir, title="Open-Answer Re-Evaluation Report", mc_correction_dir=args.mc_correction_dir,
+                                                      student_converted_response=args.student_converted_response)
         print(f"Re-evaluation scores saved to: {reeval_csv}")
         print(f"Re-evaluation report saved to: {reeval_report}")
 
