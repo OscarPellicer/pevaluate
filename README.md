@@ -24,11 +24,14 @@ Install the Playwright browser binaries used for HTML-to-PDF export:
 playwright install chromium
 ```
 
-Create a `.env` file with your OpenRouter API key:
+Create a `.env` file with the API key of the provider you use:
 
 ```env
-OPENROUTER_API_KEY=your_api_key_here
+ANTHROPIC_API_KEY=your_api_key_here   # for bare Claude model ids, e.g. claude-opus-5-5 (the default)
+OPENROUTER_API_KEY=your_api_key_here  # for any other model name, e.g. google/gemini-3.1-pro-preview
 ```
+
+Bare `claude-...` model ids are called through the official Anthropic SDK (with streaming and Anthropic's server-side refusal fallback); every other model name goes to OpenRouter. Use `--api-key-env NAME` to read the key from another variable, and `--effort low|medium|high` to set the reasoning effort (default `medium`).
 
 ## Moodle Setup
 
@@ -84,7 +87,7 @@ pevaluate "my_assignment" \
   --files-regex ".*\.(ipynb|html)$" \
   --prefer-extensions ".ipynb;.html" \
   --keep-prompt \
-  --model "google/gemini-3.1-pro-preview"
+  --model claude-opus-5-5 --effort medium
 ```
 
 For an already unzipped Moodle download:
@@ -319,8 +322,10 @@ pevaluate exam-open \
   --index-csv generated_exam/correction_results/open_responses_index.csv \
   --exam-dir generated_exam \
   --output-dir generated_exam/open_evaluation \
-  --model google/gemini-3.1-pro-preview
+  --model claude-haiku-5-5
 ```
+
+Crops are converted to grayscale and downscaled to `--max-image-width` pixels (default 900) before they are sent: this halves the image tokens and did not change the grades in our tests. Progress is saved to `open_evaluations.yaml` after every graded response, so an interrupted run can be resumed by running the same command again.
 
 The editable canonical artifact is:
 
@@ -341,6 +346,8 @@ Useful flags:
 | `--re-evaluate` | Run a second grading pass in a sibling `reevaluation/` folder after post-analysis. First-pass artifacts are kept. |
 | `--mc-correction-dir` | Optional pexams correction directory. Adds corrected MC template PNGs to student PDFs and includes `stats_report.html` in the global report when present. |
 | `--student-converted-response` | Also show the transcribed response in per-student PDFs. Off by default (students see their crop, score and feedback); the global report always includes it. |
+| `--void-questions` | Comma-separated open questions (exam number, e.g. `26`, or original id) removed for everyone, from both score and max. |
+| `--void-questions-nicely` | Comma-separated open questions that count for a student only if they raise that student's mark: the question's score/max is compared with the rest of the exam, including the multiple-choice part from `--mc-correction-dir`, so it never lowers anyone's mark. Several are added in decreasing ratio while they raise the mark. Void multiple-choice questions in pexams (`--void-questions-nicely` with `--only-analysis`), which `final_marks.csv` then reflects. The final marks per student go to `overall_marks.csv`, and the PDFs show the voided questions. Re-running with these flags reuses the existing grades (no new LLM calls). |
 
 Outputs include:
 
@@ -380,7 +387,9 @@ pevaluate test-open --real-llm --output-dir generated/open_answer_eval_real
 | Option | Description | Default |
 | :--- | :--- | :--- |
 | `session_folder` | Folder containing the assignment materials, or a single submission file. | required |
-| `--model` | OpenRouter model. | `google/gemini-3.1-pro-preview` |
+| `--model` | Grading model: a bare `claude-...` id (Anthropic API) or any OpenRouter model name. | `claude-opus-5-5` |
+| `--effort` | Reasoning effort (`low`, `medium`, `high`); empty for the provider default. | `medium` |
+| `--api-key-env` | Environment variable that holds the API key. | `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` |
 | `--rubric` | Rubric file in the session folder. | `rubric.txt` |
 | `--example` | Example feedback file in the session folder. | `example.txt` |
 | `--reference` | Optional reference file(s), separated by `;`. | empty |
@@ -402,9 +411,70 @@ pevaluate test-open --real-llm --output-dir generated/open_answer_eval_real
 | `--no-convert` | Skip notebook-to-Markdown conversion. | false |
 | `--no-grade` | Skip grading entirely, including prompt preparation. | false |
 
+## Free-Form Exams (answers on blank paper)
+
+`pevaluate exam-free` grades handwritten exams written on blank sheets, without answer boxes. Each exam (`--pages-per-exam` consecutive pages) is sent whole to a vision model together with every question, expected answer and rubric from the pexams exam directory. The model reads the student's name and ID, matches each answer to its question by content (students may number answers differently, e.g. with the numbering of a longer original exam) and grades it. The output has the same format as `exam-open` (`open_scores.csv`, editable `open_evaluations.yaml`, report and per-student PDFs), and manual edits in the YAML are kept on the next run.
+
+```bash
+pevaluate exam-free \
+  --input-path scans_blank_paper.pdf \
+  --exam-dir generated_exam \
+  --output-dir generated_exam/free_evaluation \
+  --pages-per-exam 1 \
+  --model claude-haiku-5-5
+```
+
+## Combining Lab and Exam Marks
+
+`pevaluate combine-marks` builds one table per student from the lab feedback YAML files and one or more exam `open_scores.csv` files. Names are matched across sources ignoring accents, case and order (fuzzy). Pair submissions give the lab mark to every member listed in the YAML; a student who appears in two submissions is flagged in `lab_conflict` instead of silently keeping one.
+
+```bash
+pevaluate combine-marks \
+  --lab-feedback my_assignment/feedback \
+  --exam-scores exam/correction/open_evaluation/open_scores.csv exam/free_evaluation/open_scores.csv \
+  --output marks.csv
+```
+
+The CSV is UTF-8 with BOM and `;` separators (opens directly in Excel) and includes the source of every value and the names merged as aliases.
+
+The final mark is `--lab-weight` × lab + `--exam-weight` × exam (default 0.3 and 0.7; a missing part counts as 0). Each student also gets a composed feedback text with both marks, their feedback, the weighted merge and an optional `--notice`. A student in two submissions gets the higher lab mark (both are listed in `lab_conflict`).
+
+To fill a grade file (CSV or Excel, e.g. a Moodle gradebook export), add `--roster grades.xlsx`. Rows are matched by ID digits (against the ID read from the exam), then by name; the mark column (`--roster-mark-column`, default `Nota numérica`) gets the final mark and a feedback column (`--roster-feedback-column`, default `Retroalimentación`) is added. The filled copy is written to `--roster-output` and unmatched rows are listed.
+
+## Traceability
+
+Every output folder records how it was produced:
+
+- `run_manifest.json`: command line, Python and platform, versions and git commits of pexams/ptestgen/pevaluate and of the SDKs, model, provider and effort, and the SHA-256 of the input files.
+- `llm_calls.jsonl`: one line per LLM call with the purpose and context (student, question), model requested and model actually served, whether a refusal fallback was used, effort, request id, token usage, latency, and the SHA-256 of the system prompt, prompt, images and response.
+- A `grader` block next to every graded response (exam) or submission (lab feedback YAML): model, effort, request id, time, package version and, for submissions, the rubric and prompt hashes.
+
+## Cost
+
+Measured on one lab session (21 notebooks, 27 three-question exams; options compared on samples of 5 notebooks and 24 answers). Opus 5.5 at medium effort is the reference; the differences are the mean absolute difference from it. The default, Opus 5.5 at medium effort (low for reading exam headers), favours correctness and costs about $4.70 per session; Sonnet 5.5 at high effort costs about half with similar grades, and Haiku 5.5 for exam answers lowers it further.
+
+| What | Option | Cost | Difference |
+| :--- | :--- | ---: | :--- |
+| Lab notebooks | Opus 5.5, before notebook compaction | $7.15 | reference |
+| Lab notebooks | Opus 5.5, compacted notebooks (default) | ~$3.40 | 0.22 / 10 (same as rerun noise) |
+| Lab notebooks | Opus 5.5, effort low | ~$3.20 | 0.36 / 10 |
+| Lab notebooks | Sonnet 5.5, effort high | ~$1.70 | 0.20 / 10 |
+| Lab notebooks | Sonnet 5.5, effort medium | ~$1.45 | 0.94 / 10 (skims; avoid) |
+| Lab notebooks | Haiku 5.5 | ~$0.11 | 0.49 / 10, slightly more lenient |
+| Exam answers | Opus 5.5, full-size crops | $1.90 | reference (rerun: 0.01 / 1) |
+| Exam answers | Opus 5.5, crops at 900 px (default) | ~$1.30 | 0.02 / 1 |
+| Exam answers | Sonnet 5.5, effort high, 900 px | ~$0.61 | 0.04 / 1 |
+| Exam answers | Haiku 5.5, 900 px | ~$0.05 | 0.06 / 1 |
+| Exam answers | three answers of a student in one call | ~$1.60 | 0.04 / 1 |
+
+Notebook compaction (on by default) sends the plain-text version of outputs that also have HTML (pandas tables), collapses repeated lines (e.g. thousands of identical warnings) and keeps only the head and tail of outputs longer than 3000 characters. Change the limit with `--markdown-config '{"max_output_chars": 6000}'`, or disable it with `0`.
+
+For long runs on a laptop, prevent sleep (e.g. `caffeinate -i pevaluate …` on macOS): a request in flight when the machine sleeps can block the run for as long as it sleeps.
+
 ## Notes
 
 - Prompt size is printed for each submission in characters and approximate tokens.
+- Moodle zips are unpacked with the students' real names (Moodle stores UTF-8 names without the zip UTF-8 flag), and `students/_submissions_index.json` maps every flattened file to its Moodle submission folder. Files from the same submission (e.g. a notebook and its HTML export) are grouped with it, so `--prefer-extensions` keeps only one.
 - PDF extraction uses PyMuPDF4LLM for Markdown/layout-aware output. Pandoc remains useful for DOCX/HTML/Markdown workflows, but it is not used for PDF extraction because it does not provide comparable PDF layout recovery.
 - HTML sanitization removes `<style>`, `<script>`, embedded images, SVGs, comments, and other noisy artifacts.
 - Prompt files are saved in `prompts/` when `--keep-prompt` is used.

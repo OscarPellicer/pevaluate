@@ -15,6 +15,10 @@ from typing import Dict, Optional
 import yaml
 from dotenv import load_dotenv
 
+from autocorrect.llm import LLMClient, write_run_manifest
+
+GRADER_SYSTEM = "You are an assistant helping a teacher grade open-answer exam responses."
+
 
 
 def openrouter_extra_body(model_name):
@@ -87,7 +91,7 @@ Return only valid JSON with this shape:
 {{
   "score": <number from 0 to {max_points}>,
   "max_score": {max_points},
-  "feedback": "<very brief feedback in the language of the student's response>",
+  "feedback": "<one short sentence (at most 20 words), in the language of the student's response, saying only what is missing or wrong; 'Correcto.' if nothing is>",
   "response_markdown": "<student response transcribed to Markdown, preserving $math$, `code`, and Mermaid diagrams when possible>",
   "conversion_warnings": ["<short warning for any content that could not be converted to Markdown>"],
   "confidence": <number from 0 to 1>
@@ -158,7 +162,44 @@ def _parse_json_response(text: str) -> dict:
     return json.loads(text)
 
 
-def _evaluate_with_llm(client, model: str, prompt: str, crop_path: str) -> dict:
+def _grader_record(meta: dict) -> dict:
+    """The provenance kept next to each graded response."""
+    return {
+        "provider": meta.get("provider"),
+        "model": meta.get("model_served") or meta.get("model_requested"),
+        "model_requested": meta.get("model_requested"),
+        "effort": meta.get("effort"),
+        "fallback_used": meta.get("fallback_used"),
+        "request_id": meta.get("request_id"),
+        "graded_at_utc": meta.get("timestamp_utc"),
+        "tool_version": meta.get("tool_version"),
+    }
+
+
+def image_for_model(path: str, max_width: Optional[int] = 900) -> tuple[bytes, str]:
+    """Grayscale PNG no wider than ``max_width`` pixels. Image tokens grow with the pixel
+    count, and handwriting stays legible at ~900 px for a full-width answer box."""
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.open(path).convert("L")
+    if max_width and image.width > max_width:
+        image = image.resize((max_width, round(image.height * max_width / image.width)), Image.LANCZOS)
+    buffer = BytesIO()
+    image.save(buffer, "PNG", optimize=True)
+    return buffer.getvalue(), "image/png"
+
+
+def _evaluate_with_llm(client, model: str, prompt: str, crop_path: str, context: Optional[dict] = None,
+                       max_image_width: Optional[int] = 900) -> dict:
+    if isinstance(client, LLMClient):
+        text, meta = client.complete(
+            prompt, images=[image_for_model(crop_path, max_image_width)], system=GRADER_SYSTEM,
+            json_output=True, purpose="grade_open_answer", context=context,
+        )
+        result = _parse_json_response(text)
+        result["grader"] = _grader_record(meta)
+        return result
     params = {
         "model": model,
         "messages": [
@@ -199,6 +240,7 @@ def _coerce_result(result: dict, base_result: dict) -> dict:
         "response_markdown": result.get("response_markdown", ""),
         "conversion_warnings": warnings,
         "confidence": result.get("confidence", ""),
+        "grader": result.get("grader") or {},
     }
 
 
@@ -245,6 +287,7 @@ def _write_evaluations_yaml(output_dir: str, result_rows: list[dict]):
             ],
             "confidence": row.get("confidence", ""),
             "status": row.get("status", ""),
+            "grader": row.get("grader") or {},
         })
     with open(_evaluations_yaml_path(output_dir), "w", encoding="utf-8") as f:
         yaml.safe_dump({"responses": responses}, f, allow_unicode=True, sort_keys=False, width=1000)
@@ -303,12 +346,15 @@ def evaluate_open_responses(
     index_csv: str,
     exam_dir: str,
     output_dir: str,
-    model: str = "google/gemini-3.1-pro-preview",
+    model: str = "claude-opus-5-5",
     dry_run: bool = False,
     keep_prompts: bool = False,
     force_regrade: bool = False,
     model_input_dir: Optional[str] = None,
     client=None,
+    effort: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    max_image_width: Optional[int] = 900,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     prompts_dir = os.path.join(output_dir, "prompts")
@@ -319,13 +365,17 @@ def evaluate_open_responses(
     rows = _read_index_rows(index_csv)
 
     if not dry_run and client is None:
-        import openai
-
         load_project_dotenv()
-        api_key = os.getenv("OPENROUTER_API_KEY")
         # Without a key, responses already graded in the YAML (e.g. after manual edits) can still
         # be reused to rebuild the reports; the error is raised only if something needs grading.
-        client = openai.OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key) if api_key else None
+        try:
+            client = LLMClient(model, effort=effort, api_key_env=api_key_env,
+                               log_path=os.path.join(output_dir, "llm_calls.jsonl"), tool="pevaluate")
+            write_run_manifest(output_dir, "pevaluate exam-open", client, inputs=[index_csv],
+                               extra={"exam_dir": os.path.abspath(exam_dir)})
+        except RuntimeError as e:
+            print(f"Warning: {e}")
+            client = None
 
     result_rows = []
     for row in rows:
@@ -367,14 +417,19 @@ def evaluate_open_responses(
         else:
             try:
                 if client is None:
-                    raise RuntimeError("OPENROUTER_API_KEY not found. Use --dry-run to prepare prompts without grading.")
-                result = _coerce_result(_evaluate_with_llm(client, model, prompt, crop_path), base_result)
+                    raise RuntimeError("No API key found for the grading model. Use --dry-run to prepare prompts without grading.")
+                result = _coerce_result(_evaluate_with_llm(client, model, prompt, crop_path,
+                                                           context={"student_id": base_result["student_id"], "question_id": question_id},
+                                                           max_image_width=max_image_width), base_result)
                 status = "graded"
             except Exception as e:
                 result = {"score": "", "max_score": base_result["max_score"], "feedback": str(e), "response_markdown": "", "conversion_warnings": [], "confidence": ""}
                 status = "error"
 
         artifact_paths = _write_result_artifacts(output_dir, row, result, model_input_dir=model_input_dir)
+        if status == "graded":
+            # Save progress after every new grade, so an interrupted run loses nothing.
+            _write_evaluations_yaml(output_dir, result_rows + [{**base_result, **result, "status": status}])
 
         result_rows.append({
             **base_result,
@@ -384,6 +439,7 @@ def evaluate_open_responses(
             "response_markdown": result.get("response_markdown", ""),
             "conversion_warnings": "; ".join(result.get("conversion_warnings", []) or []),
             "confidence": result.get("confidence", ""),
+            "grader": result.get("grader") or {},
             **artifact_paths,
             "evaluations_yaml": _evaluations_yaml_path(output_dir),
             "status": status,
@@ -395,9 +451,13 @@ def evaluate_open_responses(
         "student_id", "student_name", "model_id", "question_id", "question_text", "original_id",
         "crop_path", "score", "max_score", "feedback", "response_markdown",
         "conversion_warnings", "confidence", "model_input_path", "evaluations_yaml", "status",
+        "grader_model", "grader_effort",
     ]
+    for row in result_rows:
+        row["grader_model"] = (row.get("grader") or {}).get("model", "")
+        row["grader_effort"] = (row.get("grader") or {}).get("effort", "")
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(result_rows)
     return output_csv
@@ -487,7 +547,15 @@ def _student_summary_table(mc_row: dict, student_rows: list[dict]) -> str:
         if max_score is None:
             continue
         shown = f"{score:.2f}" if score is not None else "pending"
-        lines.append(f"<tr><td>Question {html.escape(str(row.get('question_id', '')))}</td><td>{shown}</td><td>{max_score:.2f}</td></tr>")
+        label = f"Question {row.get('question_id', '')}"
+        status = row.get("_void_status", "")
+        if status in VOID_EXCLUDED:
+            note = "voided" if status == "void" else "voided: not counted, it would lower the mark"
+            lines.append(f"<tr class='voided'><td>{html.escape(label)} ({note})</td><td>{shown}</td><td>—</td></tr>")
+            continue
+        if status == "nicely_counted":
+            label += " (voided: counted because it raises the mark)"
+        lines.append(f"<tr><td>{html.escape(label)}</td><td>{shown}</td><td>{max_score:.2f}</td></tr>")
         total, total_max = total + (score or 0.0), total_max + max_score
     if not lines:
         return ""
@@ -512,8 +580,12 @@ def _student_totals(graded_rows: list[dict]) -> list[dict]:
                 "student_name": row.get("student_name", ""),
                 "score": 0.0,
                 "max_score": 0.0,
+                "voided_questions": "",
             },
         )
+        if row.get("_void_status") in VOID_EXCLUDED:
+            item["voided_questions"] = ",".join(filter(None, [item["voided_questions"], str(row.get("question_id", ""))]))
+            continue
         item["score"] += row["_score"]
         item["max_score"] += row["_max_score"]
     return list(grouped.values())
@@ -676,6 +748,92 @@ def _write_pdf_from_html(html_path: str, pdf_path: str) -> bool:
         return False
 
 
+VOID_EXCLUDED = ("void", "nicely_excluded")
+
+
+def _parse_question_list(value) -> set[str]:
+    """``"26, q14_modelo_dual"`` or a list -> {"26", "q14_modelo_dual"}."""
+    if not value:
+        return set()
+    items = value.split(",") if isinstance(value, str) else value
+    return {str(item).strip() for item in items if str(item).strip()}
+
+
+def resolve_question_voids(rows: list[dict], mc_feedback: Optional[Dict[str, dict]] = None,
+                           void_questions=None, void_questions_nicely=None) -> list[dict]:
+    """Mark voided open questions on the score rows (in place) in ``row["_void_status"]``.
+
+    Questions are named by their exam number (``question_id``) or ``original_id``.
+    ``void_questions`` are removed for everyone (score and max). ``void_questions_nicely``
+    count for a student only if they raise that student's mark, the open-answer analogue of
+    pexams' rule for multiple choice: each question's ratio score/max is compared with the
+    rest of the exam (the multiple-choice part from ``mc_feedback`` plus the other counted
+    open questions). Several nicely voided questions are added in decreasing ratio while
+    they raise the mark, which gives the best possible mark. A tie leaves the mark
+    unchanged, so the question is excluded. Statuses: ``void``, ``nicely_counted``,
+    ``nicely_excluded``, or ``""``.
+    """
+    void = _parse_question_list(void_questions)
+    nicely = _parse_question_list(void_questions_nicely) - void
+    mc_feedback = mc_feedback or {}
+
+    def names(row):
+        return {str(row.get("question_id", "")).strip(), str(row.get("original_id", "")).strip()} - {""}
+
+    by_student: Dict[str, list[dict]] = {}
+    for row in rows:
+        row["_void_status"] = "void" if names(row) & void else ""
+        by_student.setdefault(row.get("student_id", ""), []).append(row)
+
+    for student_id, student_rows in by_student.items():
+        mc = mc_feedback.get(student_id, {})
+        score = _to_float(mc.get("score")) or 0.0
+        max_score = _to_float(mc.get("max_score")) or 0.0
+        candidates = []
+        for row in student_rows:
+            row_score, row_max = _to_float(row.get("score")), _to_float(row.get("max_score"))
+            if row["_void_status"] or row_max is None:
+                continue
+            if names(row) & nicely:
+                candidates.append((row, row_score or 0.0, row_max))
+            else:
+                score, max_score = score + (row_score or 0.0), max_score + row_max
+        for row, row_score, row_max in sorted(candidates, key=lambda c: c[1] / c[2] if c[2] else 0.0, reverse=True):
+            current = score / max_score if max_score else 0.0
+            if row_max and row_score / row_max > current:
+                row["_void_status"] = "nicely_counted"
+                score, max_score = score + row_score, max_score + row_max
+            else:
+                row["_void_status"] = "nicely_excluded"
+    return rows
+
+
+def write_overall_marks_csv(combined: list[dict], mc_feedback: Dict[str, dict], output_dir: str) -> str:
+    """One row per student with the multiple-choice part, the open part and the final mark /10."""
+    path = os.path.join(output_dir, "overall_marks.csv")
+    fields = ["student_id", "student_name", "mc_score", "mc_max", "open_score", "open_max",
+              "total_score", "total_max", "mark", "voided_questions"]
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for item in sorted(combined, key=lambda row: row.get("student_name", "") or row.get("student_id", "")):
+            mc = mc_feedback.get(item["student_id"], {})
+            mc_score, mc_max = _to_float(mc.get("score")) or 0.0, _to_float(mc.get("max_score")) or 0.0
+            writer.writerow({
+                "student_id": item["student_id"],
+                "student_name": item.get("student_name", ""),
+                "mc_score": round(mc_score, 4),
+                "mc_max": round(mc_max, 4),
+                "open_score": round(item["score"] - mc_score, 4),
+                "open_max": round(item["max_score"] - mc_max, 4),
+                "total_score": round(item["score"], 4),
+                "total_max": round(item["max_score"], 4),
+                "mark": round(10 * item["score"] / item["max_score"], 4) if item["max_score"] else "",
+                "voided_questions": item.get("voided_questions", ""),
+            })
+    return path
+
+
 def _combined_totals(open_totals: list[dict], mc_feedback: Dict[str, dict]) -> list[dict]:
     combined: Dict[str, dict] = {}
     for item in open_totals:
@@ -684,6 +842,7 @@ def _combined_totals(open_totals: list[dict], mc_feedback: Dict[str, dict]) -> l
             "student_name": item.get("student_name", ""),
             "score": float(item.get("score", 0) or 0),
             "max_score": float(item.get("max_score", 0) or 0),
+            "voided_questions": item.get("voided_questions", ""),
         }
     for student_id, item in mc_feedback.items():
         target = combined.setdefault(
@@ -718,9 +877,16 @@ def generate_open_response_report(
     title: str = "Open-Answer Report",
     mc_correction_dir: Optional[str] = None,
     student_converted_response: bool = False,
+    void_questions=None,
+    void_questions_nicely=None,
 ) -> str:
+    """Global report, per-student PDFs and ``overall_marks.csv``. ``void_questions`` and
+    ``void_questions_nicely`` (exam numbers or original ids) are applied as described in
+    :func:`resolve_question_voids`; void multiple-choice questions in pexams instead."""
     rows = _read_scores(scores_csv)
     os.makedirs(output_dir, exist_ok=True)
+    mc_feedback = _load_mc_feedback_context(mc_correction_dir)
+    resolve_question_voids(rows, mc_feedback, void_questions, void_questions_nicely)
     graded_rows = []
     for row in rows:
         try:
@@ -739,8 +905,8 @@ def generate_open_response_report(
     totals = _student_totals(graded_rows)
     total_scores = [item["score"] for item in totals]
     total_max = max((item["max_score"] for item in totals), default=0.0)
-    mc_feedback = _load_mc_feedback_context(mc_correction_dir)
     combined = _combined_totals(totals, mc_feedback)
+    write_overall_marks_csv(combined, mc_feedback, output_dir)
     overall_plot = _plot_overall_mark_distribution(combined, output_dir)
     mc_report_styles, mc_report_html = _extract_html_fragment(os.path.join(os.path.abspath(mc_correction_dir), "stats_report.html")) if mc_correction_dir else ("", "")
 
@@ -922,19 +1088,22 @@ def generate_open_response_report(
     pdf_path = os.path.join(output_dir, "open_responses_report.pdf")
     _write_pdf_from_html(html_path, pdf_path)
     generate_student_feedback_pdfs(scores_csv, output_dir, mc_correction_dir=mc_correction_dir,
-                                   include_converted_response=student_converted_response)
+                                   include_converted_response=student_converted_response,
+                                   void_questions=void_questions, void_questions_nicely=void_questions_nicely)
     return html_path
 
 
 def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correction_dir: Optional[str] = None,
-                                   include_converted_response: bool = False) -> str:
+                                   include_converted_response: bool = False,
+                                   void_questions=None, void_questions_nicely=None) -> str:
     rows = _read_scores(scores_csv)
+    mc_feedback = _load_mc_feedback_context(mc_correction_dir)
+    resolve_question_voids(rows, mc_feedback, void_questions, void_questions_nicely)
     grouped: Dict[str, list[dict]] = {}
     for row in rows:
         grouped.setdefault(row.get("student_id", "unknown"), []).append(row)
     out_dir = os.path.join(output_dir, "student_feedback_pdfs")
     os.makedirs(out_dir, exist_ok=True)
-    mc_feedback = _load_mc_feedback_context(mc_correction_dir)
 
     def render_md(text: str) -> str:
         return _render_markdown(text)
@@ -1005,6 +1174,7 @@ def generate_student_feedback_pdfs(scores_csv: str, output_dir: str, mc_correcti
     .summary-table td, .summary-table th { border-bottom: 1px solid #e2e8f0; padding: 4px 12px; text-align: right; }
     .summary-table td:first-child, .summary-table th:first-child { text-align: left; }
     .summary-table tr.total td { font-weight: 700; }
+    .summary-table tr.voided td { color: #718096; font-style: italic; }
     """
     html_paths = []
     for student_id, student_rows in grouped.items():
@@ -1063,7 +1233,8 @@ def _reevaluation_output_dir(output_dir: str) -> str:
     return str(path / "reevaluation")
 
 
-def run_post_analysis(scores_csv: str, output_dir: str, model: str = "google/gemini-3.1-pro-preview", force: bool = False, client=None) -> str:
+def run_post_analysis(scores_csv: str, output_dir: str, model: str = "claude-opus-5-5", force: bool = False, client=None,
+                      effort: Optional[str] = "medium", api_key_env: Optional[str] = None) -> str:
     output_path = _post_analysis_yaml_path(output_dir)
     if os.path.exists(output_path) and not force:
         return output_path
@@ -1082,13 +1253,9 @@ def run_post_analysis(scores_csv: str, output_dir: str, model: str = "google/gem
     ]
 
     if client is None:
-        import openai
-
         load_project_dotenv()
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY not found.")
-        client = openai.OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+        client = LLMClient(model, effort=effort, api_key_env=api_key_env,
+                           log_path=os.path.join(output_dir, "llm_calls.jsonl"), tool="pevaluate")
 
     prompt = (
         "Analyze these graded open-answer exam responses. Return JSON with keys "
@@ -1096,16 +1263,21 @@ def run_post_analysis(scores_csv: str, output_dir: str, model: str = "google/gem
         "and notes (string).\n\n"
         + json.dumps(responses, ensure_ascii=False)
     )
-    response = client.chat.completions.create(
-        model=model,
-        extra_body=openrouter_extra_body(model),
-        messages=[
-            {"role": "system", "content": "You help teachers analyze graded exam responses."},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-    )
-    data = _parse_json_response(response.choices[0].message.content)
+    if isinstance(client, LLMClient):
+        text, _ = client.complete(prompt, system="You help teachers analyze graded exam responses.",
+                                  json_output=True, purpose="post_analysis")
+    else:
+        response = client.chat.completions.create(
+            model=model,
+            extra_body=openrouter_extra_body(model),
+            messages=[
+                {"role": "system", "content": "You help teachers analyze graded exam responses."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        text = response.choices[0].message.content
+    data = _parse_json_response(text)
     payload = {
         "source_scores_csv": os.path.abspath(scores_csv),
         "responses_count": len(rows),
@@ -1259,7 +1431,7 @@ def _write_smoke_mc_report(mc_dir: str, students: list[tuple[str, str, float, li
             })
 
 
-def run_open_answer_smoke_test(output_dir: Optional[str] = None, real_llm: bool = False, model: str = "google/gemini-3.1-pro-preview") -> str:
+def run_open_answer_smoke_test(output_dir: Optional[str] = None, real_llm: bool = False, model: str = "claude-opus-5-5") -> str:
     root = output_dir or tempfile.mkdtemp(prefix="pevaluate_open_smoke_")
     os.makedirs(root, exist_ok=True)
     exam_dir = os.path.join(root, "exam")
@@ -1344,7 +1516,10 @@ def main(argv: Optional[list[str]] = None):
     parser.add_argument("--index-csv", required=True, help="Path to pexams open_responses_index.csv.")
     parser.add_argument("--exam-dir", required=True, help="Directory containing exam_model_*_questions.json.")
     parser.add_argument("--output-dir", required=True, help="Directory for open_scores.csv, prompts, and feedback.")
-    parser.add_argument("--model", default="google/gemini-3.1-pro-preview", help="OpenRouter model to use.")
+    parser.add_argument("--model", default="claude-opus-5-5", help="Grading model. Bare 'claude-...' ids use the Anthropic API; others (e.g. google/gemini-3.1-pro-preview) use OpenRouter.")
+    parser.add_argument("--effort", default="medium", help="Reasoning effort (low/medium/high); empty for the provider default.")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable holding the API key (default: ANTHROPIC_API_KEY or OPENROUTER_API_KEY).")
+    parser.add_argument("--max-image-width", type=int, default=900, help="Downscale crops to this width in pixels before sending them (0 = original size). Fewer image tokens, same grades in our tests.")
     parser.add_argument("--dry-run", action="store_true", help="Write prompts and pending score rows without calling an LLM.")
     parser.add_argument("--keep-prompts", action="store_true", help="Save generated grading prompts.")
     parser.add_argument("--force-regrade", action="store_true", help="Ignore existing per-response evaluation JSON files and call the model again.")
@@ -1352,6 +1527,8 @@ def main(argv: Optional[list[str]] = None):
     parser.add_argument("--re-evaluate", action="store_true", help="Reserved for regrading with a revised rubric after post-analysis.")
     parser.add_argument("--mc-correction-dir", help="Optional pexams correction-results directory to merge multiple-choice feedback into per-student PDFs.")
     parser.add_argument("--student-converted-response", action="store_true", help="Also include the transcribed (converted) response in the per-student feedback PDFs. Off by default; the global report always includes it.")
+    parser.add_argument("--void-questions", default=None, help="Comma-separated open questions (exam number or original id) removed for everyone. Void multiple-choice questions with pexams --void-questions.")
+    parser.add_argument("--void-questions-nicely", default=None, help="Comma-separated open questions that count for a student only if they raise the student's overall mark (multiple choice from --mc-correction-dir included). Void multiple-choice questions with pexams --void-questions-nicely.")
     args = parser.parse_args(argv)
 
     output_csv = evaluate_open_responses(
@@ -1362,18 +1539,25 @@ def main(argv: Optional[list[str]] = None):
         dry_run=args.dry_run,
         keep_prompts=args.keep_prompts,
         force_regrade=args.force_regrade,
+        effort=args.effort or None,
+        api_key_env=args.api_key_env,
+        max_image_width=args.max_image_width or None,
     )
     report_path = generate_open_response_report(output_csv, args.output_dir, mc_correction_dir=args.mc_correction_dir,
-                                                student_converted_response=args.student_converted_response)
+                                                student_converted_response=args.student_converted_response,
+                                                void_questions=args.void_questions,
+                                                void_questions_nicely=args.void_questions_nicely)
     print(f"Open-answer scores saved to: {output_csv}")
     print(f"Open-answer report saved to: {report_path}")
     if args.post_analysis:
         analysis_dir = _reevaluation_output_dir(args.output_dir) if args.re_evaluate else args.output_dir
-        analysis_path = run_post_analysis(output_csv, analysis_dir, model=args.model, force=args.force_regrade)
+        analysis_path = run_post_analysis(output_csv, analysis_dir, model=args.model, force=args.force_regrade,
+                                              effort=args.effort or None, api_key_env=args.api_key_env)
         print(f"Post-analysis saved to: {analysis_path}")
     if args.re_evaluate:
         if not args.post_analysis:
-            analysis_path = run_post_analysis(output_csv, _reevaluation_output_dir(args.output_dir), model=args.model, force=args.force_regrade)
+            analysis_path = run_post_analysis(output_csv, _reevaluation_output_dir(args.output_dir), model=args.model, force=args.force_regrade,
+                                              effort=args.effort or None, api_key_env=args.api_key_env)
             print(f"Post-analysis saved to: {analysis_path}")
         reeval_dir = _reevaluation_output_dir(args.output_dir)
         reeval_csv = evaluate_open_responses(
@@ -1385,6 +1569,9 @@ def main(argv: Optional[list[str]] = None):
             keep_prompts=args.keep_prompts,
             force_regrade=args.force_regrade,
             model_input_dir=os.path.join(args.output_dir, "model_inputs"),
+            effort=args.effort or None,
+            api_key_env=args.api_key_env,
+            max_image_width=args.max_image_width or None,
         )
         reeval_report = generate_open_response_report(reeval_csv, reeval_dir, title="Open-Answer Re-Evaluation Report", mc_correction_dir=args.mc_correction_dir,
                                                       student_converted_response=args.student_converted_response)
@@ -1396,7 +1583,7 @@ def smoke_main(argv: Optional[list[str]] = None):
     parser = argparse.ArgumentParser(description="Run a small open-answer evaluation smoke test.")
     parser.add_argument("--output-dir", help="Directory where smoke artifacts will be written.")
     parser.add_argument("--real-llm", action="store_true", help="Call OpenRouter instead of the built-in fake client. This burns tokens.")
-    parser.add_argument("--model", default="google/gemini-3.1-pro-preview", help="OpenRouter model for --real-llm.")
+    parser.add_argument("--model", default="claude-opus-5-5", help="Model for --real-llm.")
     args = parser.parse_args(argv)
     output_dir = run_open_answer_smoke_test(args.output_dir, real_llm=args.real_llm, model=args.model)
     print(f"Open-answer smoke artifacts saved to: {output_dir}")

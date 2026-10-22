@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pevaluate"
-version = "0.1.8"
+version = "0.2.0"
 description = "Automated correction pipeline for JupyterLab sessions using LLMs"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
+    "Pillow",
+    "anthropic>=1.0.0",
     "openai>=1.0.0",
     "python-dotenv",
     "tenacity",

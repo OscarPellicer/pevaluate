@@ -1,6 +1,20 @@
+import json
+import unicodedata
 import zipfile
 import os
 import argparse
+
+SUBMISSIONS_INDEX = "_submissions_index.json"
+
+
+def load_submissions_index(directory):
+    """Map flat file name -> {"submission": Moodle folder, "student": "Surname, Name", ...}."""
+    path = os.path.join(directory, SUBMISSIONS_INDEX)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
 
 def unpack_and_flatten(zip_path, output_path):
     """
@@ -22,6 +36,8 @@ def unpack_and_flatten(zip_path, output_path):
         members = zip_ref.infolist()
         print(f"Found {len(members)} items in zip file.")
         count = 0
+        index_path = os.path.join(output_path, SUBMISSIONS_INDEX)
+        index = json.load(open(index_path, encoding="utf-8")) if os.path.exists(index_path) else {}
         for member in members:
             if member.is_dir():
                 continue
@@ -31,8 +47,16 @@ def unpack_and_flatten(zip_path, output_path):
                 continue
 
             original_path = member.filename
-            # Sanitize filename to ascii to avoid issues
-            safe_name = original_path.encode('ascii', 'ignore').decode()
+            # Moodle writes UTF-8 names without the zip UTF-8 flag, so Python decodes them as
+            # CP437 ("IÃ±aki"). Recover the real name, then fold accents to ASCII (Iñaki -> Inaki)
+            # instead of dropping the letters.
+            display_path = original_path
+            if not member.flag_bits & 0x800:
+                try:
+                    display_path = original_path.encode('cp437').decode('utf-8')
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    pass
+            safe_name = unicodedata.normalize('NFKD', display_path).encode('ascii', 'ignore').decode()
             flattened_path = safe_name.replace('/', '_').replace('\\', '_')
             
             # Truncate zip basename if too long (keep first 10 chars)
@@ -92,9 +116,20 @@ def unpack_and_flatten(zip_path, output_path):
                 with open(output_filepath, 'wb') as f:
                     f.write(file_data)
                 count += 1
+                # Remember which Moodle submission folder each flat file came from: the flat
+                # names are truncated, so they cannot be used to group a student's files.
+                folder = display_path.replace('\\', '/').split('/')[0] if '/' in display_path.replace('\\', '/') else ''
+                index[new_filename] = {
+                    "zip": os.path.basename(zip_path),
+                    "path_in_zip": display_path,
+                    "submission": folder,
+                    "student": folder.split('_')[0] if ',' in folder else '',
+                }
             except Exception as e:
                 print(f"Failed to extract {member.filename}: {e}")
 
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=1)
         print(f"Successfully unpacked and flattened {count} files from {zip_path} to {output_path}")
 
 

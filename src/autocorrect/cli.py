@@ -207,8 +207,16 @@ def extract_nested_zips(students_dir):
 
     print(f"Extracted {extracted} nested zip files.")
 
+def _index_entry(path):
+    from .flatunzip import load_submissions_index
+    return load_submissions_index(os.path.dirname(os.path.abspath(path))).get(os.path.basename(path), {})
+
+
 def get_student_name_from_path(path):
-    """Extracts student name from file path."""
+    """Extracts student name from file path (from the unzip index when available)."""
+    entry = _index_entry(path)
+    if entry.get("student"):
+        return entry["student"]
     filename = os.path.basename(path)
     parts = filename.split('_')
     
@@ -398,6 +406,9 @@ def get_file_priority(path, preferred_extensions):
         return len(preferred_extensions)
 
 def get_submission_group_key(path, students_dir):
+    entry = _index_entry(path)
+    if entry.get("submission"):
+        return entry["submission"]
     parent = os.path.dirname(path)
     if os.path.abspath(parent) != os.path.abspath(students_dir):
         return parent
@@ -758,18 +769,16 @@ def grade_submissions(session_folder, students_dir, args):
     load_project_dotenv()
     client = None
     if not args.no_evaluate:
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            print("Error: OPENROUTER_API_KEY not found in .env file.")
-            return
-        if openai is None:
-            print("Error: openai package not installed. Install it to grade submissions with an LLM.")
-            return
+        from .llm import LLMClient
 
-        client = openai.OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
+        try:
+            client = LLMClient(
+                args.model, effort=getattr(args, "effort", None) or None, api_key_env=getattr(args, "api_key_env", None),
+                log_path=os.path.join(session_folder, "feedback", "llm_calls.jsonl"), tool="pevaluate",
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            return
 
     # Load Rubric
     rubric_path = os.path.join(session_folder, args.rubric)
@@ -920,6 +929,8 @@ Here is the reference solution:
         prompt = \
 f"""You are a helpful assistant that grades University assignments. You are given the student submission (mandatory), a rubric (mandatory), an example feedback (optional), a reference solution (optional), and the images extracted from the submission (optional). You need to grade the submission according to the rubric. Provide the feedback in the same language as the ones the student(s) used to answer the questions.
 
+Submitted in Moodle by: {student_name} (in a group assignment, the notebook may name the other members).
+
 Here is the student's submission to grade:
 
 {student_content}
@@ -989,18 +1000,27 @@ Please provide the feedback now:
             continue
 
         try:
-            response = get_llm_response(
-                client,
-                args.model,
-                [
-                    {"role": "system", "content": "You are a teaching assistant for a data science course."},
-                    {"role": "user", "content": build_multimodal_user_content(prompt, images_for_model)},
-                ]
+            feedback, meta = client.complete(
+                prompt,
+                images=[(image.data, image.mime_type) for image in images_for_model],
+                system="You are a teaching assistant for a data science course.",
+                purpose="grade_submission",
+                context={"submission": os.path.basename(student_file_path)},
             )
-            feedback = response.choices[0].message.content
             structured_feedback = extract_structured_feedback(feedback)
             structured_feedback["submission_file"] = student_file_path
             structured_feedback["source_id"] = get_submission_source_id(student_file_path)
+            structured_feedback["grader"] = {
+                "provider": meta["provider"],
+                "model": meta["model_served"],
+                "effort": meta["effort"],
+                "fallback_used": meta["fallback_used"],
+                "request_id": meta["request_id"],
+                "graded_at_utc": meta["timestamp_utc"],
+                "tool_version": meta["tool_version"],
+                "rubric_sha256": hashlib.sha256(rubric.encode("utf-8")).hexdigest(),
+                "prompt_sha256": meta["prompt_sha256"],
+            }
             feedback_slug = get_submission_output_slug(student_name, student_file_path, structured_feedback)
 
             feedback_dir = os.path.join(session_folder, 'feedback')
@@ -1018,6 +1038,14 @@ def main():
         from .exam_open import main as exam_open_main
         exam_open_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] in ("combine-marks", "combine"):
+        from .combine_marks import main as combine_main
+        combine_main(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "exam-free":
+        from .exam_free import main as exam_free_main
+        exam_free_main(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] in ("exam-open-test", "test-open"):
         from .exam_open import smoke_main
         smoke_main(sys.argv[2:])
@@ -1032,7 +1060,9 @@ def main():
     parser.add_argument("--no-convert", action="store_true", help="Skip the batch notebook to markdown conversion step.")
     parser.add_argument("--no-grade", action="store_true", help="Skip the LLM-based grading step entirely, including prompt preparation.")
     parser.add_argument("--no-evaluate", action="store_true", help="Prepare inputs, print token estimates, and save prompts when requested, but do not call the LLM.")
-    parser.add_argument("--model", default="google/gemini-3.1-pro-preview", help="The model to use for grading on OpenRouter.")
+    parser.add_argument("--model", default="claude-opus-5-5", help="Grading model. Bare 'claude-...' ids use the Anthropic API; others (e.g. google/gemini-3.1-pro-preview) use OpenRouter.")
+    parser.add_argument("--effort", default="medium", help="Reasoning effort (low/medium/high); empty for the provider default.")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable holding the API key (default: ANTHROPIC_API_KEY or OPENROUTER_API_KEY).")
     parser.add_argument("--student", help="Filter to grade only a specific student's submission (part of the filename). Can be a semicolon-separated list.")
     
     # New arguments for generalization

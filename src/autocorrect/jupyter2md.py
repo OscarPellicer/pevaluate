@@ -2,7 +2,7 @@ from pathlib import Path
 import argparse
 import nbformat
 from nbconvert import MarkdownExporter
-from .utils import sanitize_html_artifacts
+from .utils import compact_notebook, sanitize_html_artifacts
 
 
 def convert_notebooks(input_path: Path):
@@ -31,7 +31,7 @@ def convert_notebooks(input_path: Path):
         try:
             with open(notebook, "r", encoding="utf-8") as f:
                 nb = nbformat.read(f, as_version=4)
-            body, _ = MarkdownExporter().from_notebook_node(nb)
+            body, _ = MarkdownExporter().from_notebook_node(compact_notebook(nb))
             body = sanitize_html_artifacts(body, strip_tags=False)
             output_path = notebook.parent / f"{output_stem}.md"
             output_path.write_text(body, encoding="utf-8")
