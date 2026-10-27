@@ -2,14 +2,12 @@ import csv
 import json
 import argparse
 import yaml
+from PIL import Image
 
-from autocorrect.cli import feedback_to_moodle_csv
-from autocorrect.exam_open import (
-    build_open_answer_prompt,
-    evaluate_open_responses,
-    generate_open_response_report,
-    run_open_answer_smoke_test,
-)
+from autocorrect.moodle import feedback_to_moodle_csv
+from autocorrect.exam_open import build_open_answer_prompt, evaluate_open_responses
+from autocorrect.report import generate_open_response_report
+from autocorrect.smoke import run_open_answer_smoke_test
 
 
 def test_feedback_to_moodle_csv_resolves_english_moodle_columns(tmp_path):
@@ -138,43 +136,27 @@ def test_evaluate_open_responses_dry_run_writes_pending_scores_and_prompts(tmp_p
     assert (output_dir / "prompts" / "student-1_q_2.md").exists()
 
 
-class _FakeMessage:
-    content = json.dumps({
-        "score": 3.5,
-        "max_score": 4,
-        "feedback": "Buen trabajo; falta concretar el efecto en validación.",
-        "response_markdown": "La regularización reduce el sobreajuste usando $\\lambda$.",
-        "conversion_warnings": [],
-        "confidence": 0.9,
-    })
-
-
-class _FakeChoice:
-    message = _FakeMessage()
-
-
-class _FakeResponse:
-    choices = [_FakeChoice()]
-
-
-class _FakeCompletions:
-    def __init__(self):
-        self.calls = 0
-
-    def create(self, **kwargs):
-        self.calls += 1
-        assert kwargs["response_format"] == {"type": "json_object"}
-        return _FakeResponse()
-
-
-class _FakeChat:
-    def __init__(self):
-        self.completions = _FakeCompletions()
+_FAKE_ANSWER = json.dumps({
+    "score": 3.5,
+    "max_score": 4,
+    "feedback": "Buen trabajo; falta concretar el efecto en validación.",
+    "response_markdown": "La regularización reduce el sobreajuste usando $\\lambda$.",
+    "conversion_warnings": [],
+    "confidence": 0.9,
+})
 
 
 class _FakeClient:
+    """Same ``complete`` interface as ``autocorrect.llm.LLMClient``."""
+
     def __init__(self):
-        self.chat = _FakeChat()
+        self.calls = 0
+
+    def complete(self, prompt, images=(), **kwargs):
+        self.calls += 1
+        assert kwargs["json_output"] is True
+        assert len(images) == 1
+        return _FAKE_ANSWER, {"provider": "fake", "model_requested": "fake"}
 
 
 def test_evaluate_open_responses_with_fake_llm_writes_editable_artifacts_and_report(tmp_path):
@@ -185,7 +167,7 @@ def test_evaluate_open_responses_with_fake_llm_writes_editable_artifacts_and_rep
     responses_dir.mkdir()
 
     crop_path = responses_dir / "student_model_1_q_2.png"
-    crop_path.write_bytes(b"fake image bytes")
+    Image.new("L", (40, 20), 255).save(crop_path)
 
     (exam_dir / "exam_model_1_questions.json").write_text(
         json.dumps({
@@ -235,7 +217,7 @@ def test_evaluate_open_responses_with_fake_llm_writes_editable_artifacts_and_rep
     with open(output_csv, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
-    assert client.chat.completions.calls == 1
+    assert client.calls == 1
     assert rows[0]["status"] == "graded"
     assert rows[0]["score"] == "3.5"
     assert "$\\lambda$" in rows[0]["response_markdown"]
@@ -257,7 +239,7 @@ def test_evaluate_open_responses_with_fake_llm_writes_editable_artifacts_and_rep
         output_dir=str(output_dir),
         client=client,
     )
-    assert client.chat.completions.calls == 1
+    assert client.calls == 1
     with open(output_csv, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["status"] == "cached"
@@ -290,8 +272,8 @@ def test_open_answer_smoke_test_runs_without_real_llm(tmp_path):
     assert "question_2_score_distribution.png" in report_html
     assert 'class="mermaid"' in report_html
     feedback_html = (tmp_path / "evaluation" / "student_feedback_pdfs" / "student-1.html").read_text(encoding="utf-8")
-    assert "Corrected Multiple-Choice Template" in feedback_html
-    assert "Open-Answer Feedback" in feedback_html
+    assert "Corrected multiple-choice answer sheet" in feedback_html
+    assert "Open questions" in feedback_html
     assert "model_inputs" not in feedback_html
     assert "mc_correction/scanned_pages/student-1.png" in feedback_html.replace("\\", "/")
     assert "Multiple-Choice Report" in report_html

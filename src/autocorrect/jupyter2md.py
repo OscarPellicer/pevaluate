@@ -2,7 +2,7 @@ from pathlib import Path
 import argparse
 import nbformat
 from nbconvert import MarkdownExporter
-from .utils import compact_notebook, sanitize_html_artifacts
+from .parsing import compact_notebook, sanitize_html_artifacts
 
 
 def convert_notebooks(input_path: Path):

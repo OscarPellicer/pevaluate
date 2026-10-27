@@ -23,16 +23,8 @@ import os
 from collections import defaultdict
 
 import yaml
-from .cli import levenshtein_ratio, name_order_variants, normalize_person_name as normalize_name, token_name_similarity
-
-
-def similarity(a: str, b: str) -> float:
-    best = 0.0
-    for x in name_order_variants(a):
-        for y in name_order_variants(b):
-            # Symmetric: "Arnau Julio" must match "Arnau Julio Candel" whichever was seen first.
-            best = max(best, levenshtein_ratio(x, y), token_name_similarity(x, y), token_name_similarity(y, x))
-    return best
+from .common import add_hidden_alias, read_csv_rows
+from .names import name_similarity as similarity, normalize_name
 
 
 class Roster:
@@ -56,12 +48,15 @@ class Roster:
         return student
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="pevaluate combine-marks", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def build_parser(parser=None):
+    parser = parser or argparse.ArgumentParser(prog="pevaluate combine-marks", description=__doc__,
+                                               formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--lab-feedback", required=True)
     parser.add_argument("--exam-scores", nargs="+", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--threshold", type=float, default=75.0, help="Minimum name similarity (0-100) to merge two names.")
+    parser.add_argument("--name-threshold", dest="threshold", type=float, default=75.0,
+                        help="Minimum name similarity (0-100) to merge two names.")
+    add_hidden_alias(parser, "--threshold", "threshold", type=float)
     parser.add_argument("--lab-weight", type=float, default=0.3, help="Weight of the lab (notebook) mark in the final mark.")
     parser.add_argument("--exam-weight", type=float, default=0.7, help="Weight of the exam mark in the final mark.")
     parser.add_argument("--notice", default="", help="Text appended to every student's feedback (e.g. a warning for next time).")
@@ -72,8 +67,14 @@ def main(argv=None):
     parser.add_argument("--roster-mark-column", default="Nota numérica")
     parser.add_argument("--roster-feedback-column", default="Retroalimentación", help="Column added (or filled) with the composed feedback.")
     parser.add_argument("--roster-output", help="Filled copy of --roster (default: <roster>_filled.<ext>).")
-    args = parser.parse_args(argv)
+    return parser
 
+
+def main(argv=None):
+    run(build_parser().parse_args(argv))
+
+
+def run(args):
     roster = Roster(args.threshold)
 
     # Lab: the Moodle submitter (from the file name) and every member listed by the grader.
@@ -97,9 +98,8 @@ def main(argv=None):
     # Exams: sum the question scores of each exam.
     for scores_csv in args.exam_scores:
         exams = defaultdict(list)
-        with open(scores_csv, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                exams[(row["student_id"], row["student_name"])].append(row)
+        for row in read_csv_rows(scores_csv):
+            exams[(row["student_id"], row["student_name"])].append(row)
         for (student_id, name), rows in exams.items():
             student = roster.get(name or student_id)
             rows.sort(key=lambda r: r["question_id"])

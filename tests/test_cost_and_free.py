@@ -9,7 +9,7 @@ import yaml
 from PIL import Image
 
 from autocorrect import exam_free
-from autocorrect.cli import select_preferred_student_files, get_student_name_from_path
+from autocorrect.submissions import select_preferred_student_files, get_student_name_from_path
 from autocorrect.combine_marks import main as combine_main
 from autocorrect.exam_open import image_for_model
 from autocorrect.flatunzip import load_submissions_index, unpack_and_flatten
@@ -185,3 +185,21 @@ def test_name_similarity_is_symmetric():
     from autocorrect.combine_marks import similarity
     assert similarity("Arnau Julio", "Arnau Julio Candel") == similarity("Arnau Julio Candel", "Arnau Julio") >= 75
     assert similarity("Valentina Medina Gallazi", "Valentina Elisa Medna Gallazzi") >= 75
+
+
+def test_names_module_identical_to_pexams_copy():
+    pexams_names = pytest.importorskip("pexams.names")
+    import autocorrect.names as ours
+    assert Path(ours.__file__).read_bytes() == Path(pexams_names.__file__).read_bytes()
+
+
+def test_pdf_render_identical_to_pexams_copy():
+    pexams_pdf = pytest.importorskip("pexams.pdf_render")
+    import autocorrect.pdf_render as ours
+    assert Path(ours.__file__).read_bytes() == Path(pexams_pdf.__file__).read_bytes()
+
+
+def test_moodle_columns_identical_to_pexams_copy():
+    pexams_cols = pytest.importorskip("pexams.moodle_columns")
+    import autocorrect.moodle_columns as ours
+    assert Path(ours.__file__).read_bytes() == Path(pexams_cols.__file__).read_bytes()

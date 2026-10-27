@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from autocorrect.exam_open import load_project_dotenv, run_open_answer_smoke_test
+from autocorrect.smoke import run_open_answer_smoke_test
+from autocorrect.utils import load_project_dotenv
 
 
 def _requires_llm():

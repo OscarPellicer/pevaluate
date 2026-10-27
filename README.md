@@ -4,11 +4,9 @@
 
 The package installs as `pevaluate`. The older `autocorrect` command is still available as a CLI alias.
 
-## AI4Exams ecosystem
+## AI4Exams
 
-Pevaluate is part of the AI4Exams ecosystem together with `ptestgen`, `pexams`, and the planned `pstudio` visual orchestration layer.
-
-![AI4Exams ecosystem](https://raw.githubusercontent.com/OscarPellicer/ptestgen/refs/heads/main/media/ai4exams_ecosystem.png)
+Pevaluate is used together with `ptestgen` (writing and reviewing questions, the main entry point) and `pexams` (exam PDFs and scan correction). Agents should start from the ptestgen skill (`ptestgen skill install`), which covers the whole workflow.
 
 ## Installation
 
@@ -42,7 +40,12 @@ For Moodle upload/download workflows, enable the feedback tools in the assignmen
 
 ![Enable Feedback Comments](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/moodle.png)
 
-3. Download the Moodle submissions zip and, later, download the grading worksheet or marks CSV.
+3. In **Submissions → Actions** (with **Download submissions in folders** ticked):
+   - **Download all submissions**: the zip to put in the session folder.
+   - **Download grading worksheet**: the CSV that `pevaluate moodle-csv` fills; upload it back with **Upload grading worksheet**.
+   - **Upload feedback files in a zip**: per-student files, e.g. the corrected exams from `pexams moodle-feedback-zip`.
+
+![Moodle: Submissions → Actions](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/moodle_submissions_actions.png)
 
 You do not need to unzip the Moodle submissions zip manually. The simplest workflow is to put the downloaded zip in the session folder and let `pevaluate` unpack it.
 
@@ -285,16 +288,16 @@ pevaluate moodle-csv current_moodle_marks.csv \
   --clear-timestamps
 ```
 
-If exact matching fails, it uses fuzzy matching with a normalized Levenshtein threshold of `70/100` by default and reports each fuzzy match:
+If exact matching fails, it uses fuzzy name matching with a similarity threshold of `70/100` by default and reports each fuzzy match:
 
 ```bash
 pevaluate moodle-csv marks.csv \
   --feedback-dir feedback \
   --output marks_filled.csv \
-  --fuzzy-threshold 70
+  --name-threshold 70
 ```
 
-Use `--fuzzy-threshold 0` to disable fuzzy matching. If your Moodle CSV uses different column names, pass them explicitly:
+Use `--name-threshold 0` to disable fuzzy matching (`--fuzzy-threshold` is accepted as an alias). If your Moodle CSV uses different column names, pass them explicitly:
 
 ```bash
 pevaluate moodle-csv marks.csv \
@@ -348,6 +351,12 @@ Useful flags:
 | `--student-converted-response` | Also show the transcribed response in per-student PDFs. Off by default (students see their crop, score and feedback); the global report always includes it. |
 | `--void-questions` | Comma-separated open questions (exam number, e.g. `26`, or original id) removed for everyone, from both score and max. |
 | `--void-questions-nicely` | Comma-separated open questions that count for a student only if they raise that student's mark: the question's score/max is compared with the rest of the exam, including the multiple-choice part from `--mc-correction-dir`, so it never lowers anyone's mark. Several are added in decreasing ratio while they raise the mark. Void multiple-choice questions in pexams (`--void-questions-nicely` with `--only-analysis`), which `final_marks.csv` then reflects. The final marks per student go to `overall_marks.csv`, and the PDFs show the voided questions. Re-running with these flags reuses the existing grades (no new LLM calls). |
+| `--regrade-outside-box` | Regrade only the answers with writing outside their box (pexams `ink_outside_box=yes`) that were graded from the box alone, e.g. before pexams detected it. Those answers are always graded from the context crop with the box outlined; other grades and teacher edits are kept. |
+| `--lang {en,es,ca}` | Language of the per-student feedback PDFs (default `en`). |
+
+Feedback is written for the student as if by the teacher: the prompt forbids mentioning the image, the box, the transcription, legibility or automatic grading, and a blank answer gets score 0 and no feedback. Feedback may contain Markdown and `$math$`, rendered in the PDFs like the question statements.
+
+Besides the files below, `exam-open` writes `needs_review.csv`: the answers a teacher should look at before publishing (not graded, crop not on the printed box, writing outside the box not seen by the grader, confidence below 0.75, grader warnings about blank, cut or illegible text), with the reasons and the images to check. Answers the teacher already edited (score or feedback different from the model's, kept in the `grader` block) are left out; `open_scores.csv` marks them `teacher_edited=yes`. `overall_marks.csv` has one column per open question (`q_<number>`) and the multiple-choice counts.
 
 Outputs include:
 
@@ -376,13 +385,15 @@ Run the fake full open-answer smoke pipeline without spending tokens:
 pevaluate test-open --output-dir generated/open_answer_eval_smoke
 ```
 
-Run the same smoke test with real OpenRouter calls:
+Run the same smoke test with real model calls (`--model`):
 
 ```bash
 pevaluate test-open --real-llm --output-dir generated/open_answer_eval_real
 ```
 
 ## Main Options
+
+`pevaluate <session_folder> [options]` is short for `pevaluate grade <session_folder> [options]`; `pevaluate --help` lists the other subcommands (`exam-open`, `exam-free`, `combine-marks`, `moodle-csv`, `test-open`) and `pevaluate <subcommand> --help` their options.
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
@@ -435,11 +446,61 @@ pevaluate combine-marks \
   --output marks.csv
 ```
 
-The CSV is UTF-8 with BOM and `;` separators (opens directly in Excel) and includes the source of every value and the names merged as aliases.
+Names whose similarity reaches `--name-threshold` (default 75/100; old spelling `--threshold`) are merged. The CSV is UTF-8 with BOM and `;` separators (opens directly in Excel) and includes the source of every value and the names merged as aliases.
 
 The final mark is `--lab-weight` × lab + `--exam-weight` × exam (default 0.3 and 0.7; a missing part counts as 0). Each student also gets a composed feedback text with both marks, their feedback, the weighted merge and an optional `--notice`. A student in two submissions gets the higher lab mark (both are listed in `lab_conflict`).
 
 To fill a grade file (CSV or Excel, e.g. a Moodle gradebook export), add `--roster grades.xlsx`. Rows are matched by ID digits (against the ID read from the exam), then by name; the mark column (`--roster-mark-column`, default `Nota numérica`) gets the final mark and a feedback column (`--roster-feedback-column`, default `Retroalimentación`) is added. The filled copy is written to `--roster-output` and unmatched rows are listed.
+
+### Uploading the final marks to Moodle
+
+Moodle assignments accept two uploads (**Submissions → Actions**), not a filled Excel file:
+
+- **Upload grading worksheet** (CSV): sets the mark and the feedback comment of each student. This is the one for marks.
+- **Upload feedback files in a zip**: attaches files (e.g. corrected exams, per-student PDFs) without changing marks.
+
+For each assignment, download its grading worksheet (**Download grading worksheet**) and fill it from the `combine-marks` output:
+
+```bash
+pevaluate moodle-csv "Qualificacions-...-Sesión 1 - L1-....csv" --marks notas_P1.csv \
+    --output moodle/P1_L1_moodle.csv --partial --feedback-format html
+```
+
+- Every worksheet lists the whole course. A student is filled in only in the assignment where they **or their lab partner** submitted (worksheet status column), so a session split into several assignments (e.g. one per lab group) gets each mark exactly once. The rest are reported as "not in this assignment".
+- Students without any lab submission (exam only) are left out and listed; add `--include-no-lab` to the one assignment that should carry their mark. `--all-rows` ignores the status and fills every matched student.
+- `--feedback-format html` keeps the line breaks of the composed feedback (Moodle shows the comment as HTML); `--partial` writes only the filled rows, so other students' grades are not touched.
+- Students are matched by name (all the names seen for them, fuzzy if needed); matches that are not exact are printed.
+
+### Uploading marks and feedback to PoliformaT (UPV, Sakai)
+
+A PoliformaT assignment ("Tarea") takes everything in one zip through **Subir todo**: the grade of each student, a comment ("Comentarios del docente") and attachments (e.g. their feedback PDF). The zip must have the structure of **Descargar todo**, so that download is used as the template:
+
+1. In the assignment's list of submissions (**Ver envíos**, with "Usar el nuevo calificador" ticked), click **Descargar todo**:
+
+   ![PoliformaT: Descargar todo | Subir todo](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/poliformat_enlaces.png)
+
+2. Tick **Todas**, the grades file (either format) and **Incluir estudiantes que no han realizado un envío todavía** (for a paper exam nobody submitted anything), and download:
+
+   ![PoliformaT: Descargar todo](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/poliformat_descargar_todo.png)
+
+   The zip has a folder named after the assignment with `grades.xls` (or `grades.csv`: `Identificador, ID, Apellido, Nombre, Calificación, Fecha de envío, Envío fuera de plazo`) and one folder per student, `Apellido, Nombre(ID)`, with `comments.txt`, `feedbackText.html`, `..._submissionText.html`, `Adjuntos al comentario/` and `Adjuntos de la entrega/`.
+
+3. Fill it:
+
+```bash
+pevaluate poliformat-zip "Tarea_20260101120000.zip" --marks correction/open/overall_marks.csv \
+    --feedback-pdfs correction/open/student_feedback_pdfs --output "Tarea_subir.zip" --lang es
+```
+
+   - `--marks`: `overall_marks.csv` from `exam-open` (or a `combine-marks` output): `student_id`, `student_name`, `mark`.
+   - Students are matched by ID first (the ID read from the exam contains the PoliformaT one, e.g. the DNI digits), then by name (`--name-threshold`, default 70). Every match is printed with its method; check the ones by name. Students without a mark are left ungraded, and marks without a student are listed.
+   - The grade goes into `grades.xls`/`grades.csv` with two decimals and a decimal comma (`--decimal-sep`); `comments.txt` gets "Nota: 8,60 sobre 10. La corrección de cada pregunta está en el PDF adjunto." (`--lang es|ca|en`, or your own text with `--comment "... {mark} ..."`, plus the `feedback` column when the marks file has one); the student's `<student_id>.pdf` goes into `Adjuntos al comentario/` (`--attachment-name`).
+   - Student folders and grade rows are linked by the ID in brackets: folder names have no accents while `grades.xls` has them. Everything else in the download is kept as it was.
+
+4. Upload it with **Subir todo**: tick **Todas**, choose the **same format of the grades file** as in the download, and **No publicar información subida – Dejarlo para más tarde**. Check a couple of students in the grader (grade, comment, attachment), then **Publicar calificaciones**. The zip must stay under 200 MB, and the site language must be the one the download was made in.
+
+   ![PoliformaT: Subir todo](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/poliformat_subir_todo.png)
+
 
 ## Traceability
 
@@ -447,7 +508,7 @@ Every output folder records how it was produced:
 
 - `run_manifest.json`: command line, Python and platform, versions and git commits of pexams/ptestgen/pevaluate and of the SDKs, model, provider and effort, and the SHA-256 of the input files.
 - `llm_calls.jsonl`: one line per LLM call with the purpose and context (student, question), model requested and model actually served, whether a refusal fallback was used, effort, request id, token usage, latency, and the SHA-256 of the system prompt, prompt, images and response.
-- A `grader` block next to every graded response (exam) or submission (lab feedback YAML): model, effort, request id, time, package version and, for submissions, the rubric and prompt hashes.
+- A `grader` block next to every graded response (exam) or submission (lab feedback YAML): model, effort, request id, time, package version and, for submissions, the rubric and prompt hashes. It also keeps the model's own `score`/`feedback` (`mark`/`feedback` for submissions): edit only the top-level fields, so the differences between the model's grade and the final one can be counted (`ptestgen course edits`).
 
 ## Cost
 

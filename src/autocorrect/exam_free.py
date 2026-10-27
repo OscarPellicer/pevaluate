@@ -8,25 +8,32 @@ differently or not at all) and grades it. The results are written in the same fo
 per-student PDFs are produced, and edits to the YAML are reused on the next run.
 """
 import argparse
-import csv
 import json
 import os
 from pathlib import Path
 from typing import Optional
 
-from autocorrect.exam_open import (
+from autocorrect.common import safe_name
+from autocorrect.llm import parse_json_response
+from autocorrect.open_results import (
+    FEEDBACK_STYLE,
     GRADER_SYSTEM,
-    _grader_record,
+    grader_record,
     image_for_model,
-    _load_evaluations_yaml,
-    _load_exam_questions,
-    _parse_json_response,
-    _safe_name,
-    _write_evaluations_yaml,
-    generate_open_response_report,
-    load_project_dotenv,
+    load_evaluations_yaml,
+    load_exam_questions,
+    make_grading_client,
+    with_model_grade,
+    write_evaluations_yaml,
+    write_scores_csv,
 )
-from autocorrect.llm import LLMClient, write_run_manifest
+from autocorrect.report import generate_open_response_report
+
+FREE_SCORES_FIELDS = [
+    "student_id", "student_name", "model_id", "question_id", "question_text", "original_id",
+    "crop_path", "score", "max_score", "feedback", "response_markdown",
+    "conversion_warnings", "confidence", "model_input_path", "status", "grader_model", "grader_effort",
+]
 
 
 def _render_pages(input_path: str, pages_dir: str, dpi: int) -> list[str]:
@@ -59,8 +66,10 @@ def build_free_exam_prompt(questions: list[dict]) -> str:
 1. Read the student's name and ID number if they are written anywhere (empty string if not).
 2. Find the student's answer to each question below. Answers may be numbered differently from
    the question ids (e.g. with the numbering of a longer original exam) or not numbered at all:
-   match them by content. If a question has no answer, give score 0 and say so in the feedback.
+   match them by content. If a question has no answer, give score 0 and an empty feedback.
 3. Grade each answer with its rubric.
+
+{FEEDBACK_STYLE}
 
 Return only valid JSON with this shape:
 {{
@@ -72,7 +81,7 @@ Return only valid JSON with this shape:
       "student_label": "<the number the student wrote for this answer, if any>",
       "score": <number from 0 to the question's max score>,
       "max_score": <the question's max score>,
-      "feedback": "<one short sentence (at most 20 words), in the language of the student's response, saying only what is missing or wrong; 'Correcto.' if nothing is>",
+      "feedback": "<one short sentence (at most 20 words), in the language of the student's response, saying only what is missing or wrong; 'Correcto.' if nothing is; empty if there is no answer>",
       "response_markdown": "<the student's answer transcribed to Markdown>",
       "conversion_warnings": ["<short warning for anything unreadable>"],
       "confidence": <number from 0 to 1>
@@ -103,7 +112,7 @@ def evaluate_free_exams(
     client=None,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
-    questions = list(_load_exam_questions(exam_dir).get(str(exam_model), {}).values())
+    questions = list(load_exam_questions(exam_dir).get(str(exam_model), {}).values())
     if not questions:
         raise RuntimeError(f"No questions found for model {exam_model} in {exam_dir}.")
     questions.sort(key=lambda q: int(q["id"]) if str(q["id"]).isdigit() else str(q["id"]))
@@ -113,13 +122,10 @@ def evaluate_free_exams(
     if keep_prompts:
         Path(output_dir, "prompt.md").write_text(prompt, encoding="utf-8")
 
-    cached = {} if force_regrade else _load_evaluations_yaml(output_dir)
+    cached = {} if force_regrade else load_evaluations_yaml(output_dir)
     if not dry_run and client is None:
-        load_project_dotenv()
-        client = LLMClient(model, effort=effort, api_key_env=api_key_env,
-                           log_path=os.path.join(output_dir, "llm_calls.jsonl"), tool="pevaluate")
-        write_run_manifest(output_dir, "pevaluate exam-free", client, inputs=[input_path],
-                           extra={"exam_dir": os.path.abspath(exam_dir), "pages_per_exam": pages_per_exam})
+        client = make_grading_client(model, effort, api_key_env, output_dir, "pevaluate exam-free", inputs=[input_path],
+                                     extra={"exam_dir": os.path.abspath(exam_dir), "pages_per_exam": pages_per_exam})
 
     raw_dir = os.path.join(output_dir, "raw_responses")
     os.makedirs(raw_dir, exist_ok=True)
@@ -136,12 +142,12 @@ def evaluate_free_exams(
                 prompt, images=[image_for_model(p, max_image_width) for p in exam_pages], system=GRADER_SYSTEM,
                 json_output=True, purpose="grade_free_exam", context={"exam": exam_key, "pages": [Path(p).name for p in exam_pages]},
             )
-            data = _parse_json_response(text)
-            data["grader"] = _grader_record(meta)
+            data = parse_json_response(text)
+            data["grader"] = grader_record(meta)
             Path(raw_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
         read_id = str(data.get("student_id", "") or "").strip()
-        student_id = _safe_name(read_id) if read_id else exam_key
+        student_id = safe_name(read_id) if read_id else exam_key
         student_name = str(data.get("student_name", "") or "").strip()
         answers = {str(a.get("question_id")): a for a in data.get("answers", []) if isinstance(a, dict)}
         for q in questions:
@@ -167,30 +173,22 @@ def evaluate_free_exams(
                 "response_markdown": source.get("response_markdown", ""),
                 "conversion_warnings": "; ".join(warnings),
                 "confidence": source.get("confidence", ""),
-                "grader": (edited or {}).get("grader") or data.get("grader") or {},
+                # The raw response is never edited: its score and feedback are the model's originals.
+                "grader": with_model_grade(data.get("grader") or {}, answer)
+                          if answer and data.get("grader") else (edited or {}).get("grader") or data.get("grader") or {},
                 "pages": [os.path.abspath(p) for p in exam_pages],
                 "status": "cached" if edited is not None else ("pending" if dry_run else "graded"),
             })
 
-    _write_evaluations_yaml(output_dir, result_rows)
-    output_csv = os.path.join(output_dir, "open_scores.csv")
-    fieldnames = [
-        "student_id", "student_name", "model_id", "question_id", "question_text", "original_id",
-        "crop_path", "score", "max_score", "feedback", "response_markdown",
-        "conversion_warnings", "confidence", "model_input_path", "status", "grader_model", "grader_effort",
-    ]
-    for row in result_rows:
-        row["grader_model"] = row["grader"].get("model", "")
-        row["grader_effort"] = row["grader"].get("effort", "")
-    with open(output_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(result_rows)
-    return output_csv
+    write_evaluations_yaml(output_dir, result_rows)
+    return write_scores_csv(output_dir, result_rows, FREE_SCORES_FIELDS)
 
 
-def main(argv: Optional[list[str]] = None):
-    parser = argparse.ArgumentParser(description="Grade handwritten exams written on blank paper (no answer boxes) with a vision LLM.")
+DESCRIPTION = "Grade handwritten exams written on blank paper (no answer boxes) with a vision LLM."
+
+
+def build_parser(parser: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
+    parser = parser or argparse.ArgumentParser(prog="pevaluate exam-free", description=DESCRIPTION)
     parser.add_argument("--input-path", required=True, help="Scanned PDF, or a folder of page images in order.")
     parser.add_argument("--exam-dir", required=True, help="pexams exam directory with exam_model_*_questions.json (questions, expected answers, rubrics).")
     parser.add_argument("--output-dir", required=True, help="Directory for open_scores.csv, open_evaluations.yaml and reports.")
@@ -203,9 +201,12 @@ def main(argv: Optional[list[str]] = None):
     parser.add_argument("--max-image-width", type=int, default=1240, help="Downscale pages to this width in pixels before sending them (0 = original size).")
     parser.add_argument("--dry-run", action="store_true", help="Render pages and write the prompt without calling the LLM.")
     parser.add_argument("--force-regrade", action="store_true", help="Ignore cached raw responses and YAML edits.")
-    parser.add_argument("--keep-prompts", action="store_true", help="Save the grading prompt.")
+    parser.add_argument("--keep-prompts", "--keep-prompt", dest="keep_prompts", action="store_true", help="Save the grading prompt.")
     parser.add_argument("--student-converted-response", action="store_true", help="Also include the transcription in per-student PDFs.")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def run(args: argparse.Namespace):
     output_csv = evaluate_free_exams(
         args.input_path, args.exam_dir, args.output_dir, model=args.model, effort=args.effort or None,
         api_key_env=args.api_key_env, pages_per_exam=args.pages_per_exam, exam_model=args.exam_model,
@@ -216,3 +217,7 @@ def main(argv: Optional[list[str]] = None):
                                            student_converted_response=args.student_converted_response)
     print(f"Scores saved to: {output_csv}")
     print(f"Report saved to: {report}")
+
+
+def main(argv: Optional[list[str]] = None):
+    run(build_parser().parse_args(argv))

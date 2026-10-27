@@ -6,7 +6,8 @@ import argparse
 from pathlib import Path
 
 from autocorrect import utils
-from autocorrect.cli import _limit_images, build_multimodal_user_content, grade_submissions, main
+from autocorrect.cli import main
+from autocorrect.lab import _limit_images, grade_submissions
 
 
 PNG_BYTES = base64.b64decode(
@@ -171,20 +172,18 @@ def test_pdf_image_extraction_uses_pypdf_page_images(monkeypatch, tmp_path):
     assert "Removed 1 duplicate image" in warnings[0]
 
 
-def test_multimodal_message_content_and_image_limit():
+def test_image_limit():
     images = [
         utils._image_from_bytes("one.png", PNG_BYTES),
         utils._image_from_bytes("two.png", SECOND_PNG_BYTES),
     ]
 
     limited, omitted = _limit_images(images, 1)
-    content = build_multimodal_user_content("Grade this.", limited)
 
     assert omitted == 1
-    assert content[0] == {"type": "text", "text": "Grade this."}
-    assert content[1]["type"] == "image_url"
-    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert build_multimodal_user_content("Text only.", []) == "Text only."
+    assert limited == images[:1]
+    assert limited[0].data_url.startswith("data:image/png;base64,")
+    assert _limit_images(images, 0) == (images, 0)
 
 
 def test_no_evaluate_saves_markdown_prompt_and_image_assets(tmp_path, capsys):

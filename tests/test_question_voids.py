@@ -1,4 +1,4 @@
-from autocorrect.exam_open import _student_totals, resolve_question_voids
+from autocorrect.marks import resolve_question_voids, student_totals
 
 
 def _row(student, qid, score, max_score, original_id=""):
@@ -50,5 +50,5 @@ def test_excluded_rows_leave_the_totals():
     for r in rows:
         r["_score"], r["_max_score"] = float(r["score"]), float(r["max_score"])
     resolve_question_voids(rows, MC, void_questions_nicely="26")
-    (total,) = _student_totals(rows)
+    (total,) = student_totals(rows)
     assert (total["score"], total["max_score"], total["voided_questions"]) == (0.5, 0.75, "26")

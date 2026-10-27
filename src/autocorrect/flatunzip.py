@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unicodedata
 import zipfile
@@ -16,12 +17,81 @@ def load_submissions_index(directory):
         return json.load(f)
 
 
+def _display_path(member: zipfile.ZipInfo) -> str:
+    """The member's real name. Moodle writes UTF-8 names without the zip UTF-8 flag, so Python
+    decodes them as CP437 ("IÃ±aki"); recover the UTF-8 name when that is the case."""
+    if member.flag_bits & 0x800:
+        return member.filename
+    try:
+        return member.filename.encode('cp437').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return member.filename
+
+
+def _ascii_name(display_path: str) -> str:
+    """Fold accents to ASCII (Iñaki -> Inaki) instead of dropping the letters."""
+    return unicodedata.normalize('NFKD', display_path).encode('ascii', 'ignore').decode()
+
+
+def _flat_filename(zip_basename: str, original_path: str, ascii_path: str) -> str:
+    """Short unique flat name: ``<zip name[:10]>_<hash of the path in the zip>_<suffix>``.
+
+    The suffix keeps the path parts that look like Moodle student folders ("Surname, Name_...")
+    plus the file name, or else the end of the flattened path; long suffixes are truncated."""
+    flattened_path = ascii_path.replace('/', '_').replace('\\', '_')
+    short_zip_name = zip_basename[:10]
+    # Hash of the original path inside the zip: the same file always gets the same name.
+    name_hash = hashlib.md5(original_path.encode('utf-8')).hexdigest()[:8]
+    ext = os.path.splitext(flattened_path)[1]
+
+    path_parts = ascii_path.replace('\\', '/').split('/')
+    student_parts = [p for p in path_parts if ',' in p]
+    if student_parts:
+        relevant = []
+        for p in student_parts + [path_parts[-1]]:
+            if p not in relevant:
+                relevant.append(p)
+        safe_suffix = "_".join(relevant)
+    else:
+        safe_suffix = flattened_path[-50:] if len(flattened_path) > 50 else flattened_path
+    safe_suffix = safe_suffix.replace('/', '_').replace('\\', '_')
+
+    # Target ~80 chars: short zip name (10) + hash (8) + separators (2) leave 60 for the suffix.
+    if len(safe_suffix) > 60:
+        safe_suffix = safe_suffix[:30] + "..." + safe_suffix[-20:]
+    new_filename = f"{short_zip_name}_{name_hash}_{safe_suffix}"
+    if len(new_filename) > 100:
+        new_filename = f"{short_zip_name}_{name_hash}{ext}"
+    return new_filename
+
+
+def _index_entry(zip_path: str, display_path: str) -> dict:
+    """Which Moodle submission folder a flat file came from: the flat names are truncated,
+    so they cannot be used to group a student's files."""
+    normalized = display_path.replace('\\', '/')
+    folder = normalized.split('/')[0] if '/' in normalized else ''
+    return {
+        "zip": os.path.basename(zip_path),
+        "path_in_zip": display_path,
+        "submission": folder,
+        "student": folder.split('_')[0] if ',' in folder else '',
+    }
+
+
+def _load_index_file(index_path: str) -> dict:
+    if not os.path.exists(index_path):
+        return {}
+    with open(index_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def unpack_and_flatten(zip_path, output_path):
     """
     Unpacks a zip file, flattening the directory structure.
-    
+
     For example, a file at 'folder1/file1.txt' inside the zip will be
-    extracted as 'folder1_file1.txt' in the output path.
+    extracted as 'folder1_file1.txt' in the output path. The Moodle folder of each
+    extracted file is recorded in ``_submissions_index.json`` (merged with any existing index).
 
     Args:
         zip_path (str): The path to the zip file.
@@ -31,100 +101,24 @@ def unpack_and_flatten(zip_path, output_path):
         os.makedirs(output_path)
 
     zip_basename = os.path.splitext(os.path.basename(zip_path))[0]
+    index_path = os.path.join(output_path, SUBMISSIONS_INDEX)
 
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         members = zip_ref.infolist()
         print(f"Found {len(members)} items in zip file.")
         count = 0
-        index_path = os.path.join(output_path, SUBMISSIONS_INDEX)
-        index = json.load(open(index_path, encoding="utf-8")) if os.path.exists(index_path) else {}
+        index = _load_index_file(index_path)
         for member in members:
-            if member.is_dir():
+            # Skip folders and Mac OS X metadata
+            if member.is_dir() or '__MACOSX' in member.filename or '.DS_Store' in member.filename:
                 continue
-            
-            # Skip Mac OS X metadata
-            if '__MACOSX' in member.filename or '.DS_Store' in member.filename:
-                continue
-
-            original_path = member.filename
-            # Moodle writes UTF-8 names without the zip UTF-8 flag, so Python decodes them as
-            # CP437 ("IÃ±aki"). Recover the real name, then fold accents to ASCII (Iñaki -> Inaki)
-            # instead of dropping the letters.
-            display_path = original_path
-            if not member.flag_bits & 0x800:
-                try:
-                    display_path = original_path.encode('cp437').decode('utf-8')
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    pass
-            safe_name = unicodedata.normalize('NFKD', display_path).encode('ascii', 'ignore').decode()
-            flattened_path = safe_name.replace('/', '_').replace('\\', '_')
-            
-            # Truncate zip basename if too long (keep first 10 chars)
-            short_zip_name = zip_basename[:10]
-            
-            # Use a hash for the flattened path to guarantee unique short filenames
-            import hashlib
-            # Create a hash based on the *original relative path* inside the zip
-            # This ensures the same file always gets the same hash
-            name_hash = hashlib.md5(original_path.encode('utf-8')).hexdigest()[:8]
-            ext = os.path.splitext(flattened_path)[1]
-            
-            # Heuristic: Find parts of the path that look like student names (contain a comma)
-            # original_path uses forward or backward slashes
-            path_parts = safe_name.replace('\\', '/').split('/')
-            student_parts = [p for p in path_parts if ',' in p]
-            
-            if student_parts:
-                # Use the found student part(s) and the filename
-                filename_part = path_parts[-1]
-                
-                relevant = []
-                for p in student_parts:
-                    if p not in relevant:
-                        relevant.append(p)
-                if filename_part not in relevant:
-                    relevant.append(filename_part)
-                
-                safe_suffix = "_".join(relevant)
-            else:
-                # Fallback: use the end of the flattened path
-                safe_suffix = flattened_path[-50:] if len(flattened_path) > 50 else flattened_path
-
-            # Sanitize
-            safe_suffix = safe_suffix.replace('/', '_').replace('\\', '_')
-
-            # Length check - Aggressive truncation for deep paths
-            # Max filename length target: ~80 chars
-            # short_zip(10) + hash(8) + separators(2) = 20 chars used.
-            # Available for suffix: 60 chars.
-            if len(safe_suffix) > 60:
-                 safe_suffix = safe_suffix[:30] + "..." + safe_suffix[-20:]
-
-            new_filename = f"{short_zip_name}_{name_hash}_{safe_suffix}"
-            
-            # Final safety check
-            if len(new_filename) > 100:
-                 new_filename = f"{short_zip_name}_{name_hash}{ext}"
-
-            output_filepath = os.path.join(output_path, new_filename)
-
+            display_path = _display_path(member)
+            new_filename = _flat_filename(zip_basename, member.filename, _ascii_name(display_path))
             try:
-                # Extract the file data
-                file_data = zip_ref.read(member.filename)
-
-                # Write the data to the new flattened file
-                with open(output_filepath, 'wb') as f:
-                    f.write(file_data)
+                with open(os.path.join(output_path, new_filename), 'wb') as f:
+                    f.write(zip_ref.read(member.filename))
                 count += 1
-                # Remember which Moodle submission folder each flat file came from: the flat
-                # names are truncated, so they cannot be used to group a student's files.
-                folder = display_path.replace('\\', '/').split('/')[0] if '/' in display_path.replace('\\', '/') else ''
-                index[new_filename] = {
-                    "zip": os.path.basename(zip_path),
-                    "path_in_zip": display_path,
-                    "submission": folder,
-                    "student": folder.split('_')[0] if ',' in folder else '',
-                }
+                index[new_filename] = _index_entry(zip_path, display_path)
             except Exception as e:
                 print(f"Failed to extract {member.filename}: {e}")
 
