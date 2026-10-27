@@ -19,7 +19,7 @@ FEEDBACK_STYLE = (
     "'se identifica bien el umbral'), not addressing the student as 'you' and not as 'the student'. "
     "The feedback goes to the student as if written by the teacher: never mention the image, the scan, "
     "the crop, the box, the transcription, legibility, a review or that the grading is automatic (put any "
-    "such remark in conversion_warnings instead). If nothing was written (a blank box, or only stray marks "
+    "such remark in conversion_warnings instead). Be brief: with full marks, a few words at most; otherwise say concretely what is missing or wrong, without restating what is right. If nothing was written (a blank box, or only stray marks "
     "or traces of erased writing), the score is 0 and the feedback is an empty string."
 )
 
