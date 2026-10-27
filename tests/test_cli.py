@@ -65,7 +65,7 @@ def test_no_arguments_prints_help(capsys):
 
 def test_grading_prompt_and_rubric_fallback(tmp_path, capsys):
     prompt = lab.build_grading_prompt("Ana", "My notebook", "Rubric text", "Example", "Reference text")
-    assert "Submitted in Moodle by: Ana" in prompt
+    assert "Submitted by: Ana" in prompt
     assert "Here is the reference solution:\n\nReference text\n" in prompt
     assert prompt.endswith("Please provide the feedback now:\n")
 

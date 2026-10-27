@@ -112,7 +112,11 @@ def extract_nested_zips(students_dir):
 
     for zip_file in zip_files:
         zip_hash = hashlib.md5(zip_file.encode("utf-8")).hexdigest()[:8]
-        output_dir = os.path.join(extracted_root, f"{Path(zip_file).stem[:24]}_{zip_hash}")
+        if poliformat_student_folder(zip_file) is not None:
+            # Next to the zip, so the files stay in the student's submission.
+            output_dir = os.path.join(os.path.dirname(zip_file), f"{Path(zip_file).stem[:24]}_unzipped")
+        else:
+            output_dir = os.path.join(extracted_root, f"{Path(zip_file).stem[:24]}_{zip_hash}")
         os.makedirs(output_dir, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_file) as zf:
@@ -144,10 +148,45 @@ def _index_entry(path):
     return flatunzip.load_submissions_index(os.path.dirname(os.path.abspath(path))).get(os.path.basename(path), {})
 
 
+# A PoliformaT (Sakai) "Descargar todo": <assignment>/<Apellido, Nombre(ID)>/ holds the attached
+# files in "Adjuntos de la entrega/" and the text typed in the submission box in
+# <folder>_submissionText.html; comments.txt, timestamp.txt... are not part of the submission.
+POLIFORMAT_FOLDER = re.compile(r"^(?P<name>[^()]*,[^()]*?)\s*\((?P<id>[^()]*)\)\s*$")
+POLIFORMAT_SUBMISSION_DIRS = ("Adjuntos de la entrega", "Adjunts de la tramesa", "Submission Attachment(s)",
+                              "Submission Attachments")
+
+
+def poliformat_student_folder(path):
+    """The ``Apellido, Nombre(ID)`` folder of a PoliformaT download that holds ``path``, or None."""
+    for parent in Path(path).parents:
+        if POLIFORMAT_FOLDER.match(parent.name):
+            return parent
+    return None
+
+
+def is_poliformat_submission_file(path):
+    """False for the files of a PoliformaT student folder that are not the student's submission
+    (comments, timestamps, teacher attachments, an empty submission text). True outside PoliformaT."""
+    folder = poliformat_student_folder(path)
+    if folder is None:
+        return True
+    relative = Path(path).relative_to(folder)
+    if relative.parts[0] in POLIFORMAT_SUBMISSION_DIRS:
+        return True
+    if relative.name == f"{folder.name}_submissionText.html":
+        text = re.sub(r"<[^>]*>|&nbsp;", " ", Path(path).read_text(encoding="utf-8", errors="ignore"))
+        return bool(text.strip())
+    return False
+
+
 def get_student_name_from_path(path):
-    """Student name of a submission file: from the unzip index when available, else guessed from
-    the file name (the part with a comma, as in Moodle's "Surname, Name", or the third
-    ``_``-separated part of flatunzip's ``Zip_Hash_Student_File`` names)."""
+    """Student name of a submission file: from the unzip index when available, from the
+    PoliformaT student folder, else guessed from the file name (the part with a comma, as in
+    Moodle's "Surname, Name", or the third ``_``-separated part of flatunzip's
+    ``Zip_Hash_Student_File`` names)."""
+    folder = poliformat_student_folder(path)
+    if folder is not None:
+        return POLIFORMAT_FOLDER.match(folder.name).group("name").strip()
     entry = _index_entry(path)
     if entry.get("student"):
         return entry["student"]
@@ -201,6 +240,9 @@ def get_file_priority(path, preferred_extensions):
 
 
 def get_submission_group_key(path, students_dir):
+    folder = poliformat_student_folder(path)
+    if folder is not None:
+        return str(folder)
     entry = _index_entry(path)
     if entry.get("submission"):
         return entry["submission"]
@@ -252,7 +294,7 @@ def find_student_files(students_dir, files_regex, prefer_extensions):
     student_files = []
     for root, _, files in os.walk(students_dir):
         for file in files:
-            if regex.match(file):
+            if regex.match(file) and is_poliformat_submission_file(os.path.join(root, file)):
                 student_files.append(os.path.join(root, file))
     return select_preferred_student_files(student_files, students_dir, parse_extensions(prefer_extensions))
 

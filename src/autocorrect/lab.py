@@ -13,12 +13,14 @@ import yaml
 
 from . import utils
 from .common import add_hidden_alias
+from .parsing.pdf import render_pdf_pages
 from .submissions import (
     convert_notebooks_batch,
     extract_nested_zips,
     filter_by_student,
     find_student_files,
     get_student_name_from_path,
+    get_submission_group_key,
     get_submission_output_slug,
     get_submission_source_id,
     remove_matching_files,
@@ -30,9 +32,9 @@ from .utils import load_project_dotenv
 NO_REFERENCE = "[No reference content provided]"
 GRADING_SYSTEM = "You are a teaching assistant for a data science course."
 
-PROMPT_TEMPLATE = """You are a helpful assistant that grades University assignments. You are given the student submission (mandatory), a rubric (mandatory), an example feedback (optional), a reference solution (optional), and the images extracted from the submission (optional). You need to grade the submission according to the rubric. Provide the feedback in the same language as the ones the student(s) used to answer the questions, written impersonally in the passive voice (e.g. "the model is trained but not evaluated", "falta evaluar el modelo"), not addressing the student(s) as "you".
+PROMPT_TEMPLATE = """You are a helpful assistant that grades University assignments. You are given the student submission (mandatory), a rubric (mandatory), an example feedback (optional), a reference solution (optional), and the images extracted from the submission (optional). You need to grade the submission according to the rubric. Provide the feedback in the same language as the ones the student(s) used to answer the questions, written impersonally in the passive voice (e.g. "the model is trained but not evaluated", "falta evaluar el modelo"), not addressing the student(s) as "you". The feedback goes to the students as if written by the teacher: never mention that the grading is automatic, the conversion of the files to text or the extracted images.
 
-Submitted in Moodle by: {student_name} (in a group assignment, the notebook may name the other members).
+Submitted by: {student_name} (in a group assignment, the submission may name the other members).
 
 Here is the student's submission to grade:
 
@@ -282,10 +284,13 @@ def _images_for_model(args, reference_images, student_images, warnings):
     return images
 
 
-def _feedback_record(response_text, meta, student_file_path, rubric):
+def _feedback_record(response_text, meta, student_files, rubric):
     """The YAML stored for a graded submission, with the grader's provenance."""
+    student_file_path = student_files[0]
     structured_feedback = extract_structured_feedback(response_text)
     structured_feedback["submission_file"] = student_file_path
+    if len(student_files) > 1:
+        structured_feedback["submission_files"] = list(student_files)
     structured_feedback["source_id"] = get_submission_source_id(student_file_path)
     structured_feedback["grader"] = {
         "provider": meta["provider"],
@@ -304,21 +309,33 @@ def _feedback_record(response_text, meta, student_file_path, rubric):
     return structured_feedback
 
 
-def _grade_one(student_file_path, ctx, args, client):
-    """Build the prompt for one submission, save it if asked and, unless --no-evaluate, grade it."""
+def _grade_one(student_files, ctx, args, client):
+    """Build the prompt for one submission (one file, or all the files of a submission with
+    --whole-submission), save it if asked and, unless --no-evaluate, grade it."""
+    student_file_path = student_files[0]
     student_name = get_student_name_from_path(student_file_path)
     prompt_slug = get_submission_output_slug(student_name, student_file_path)
     prompts_dir = ctx["prompts_dir"]
-    print(f"Grading submission for {student_name} ({os.path.basename(student_file_path)})...")
+    print(f"Grading submission for {student_name} ({'; '.join(os.path.basename(p) for p in student_files)})...")
 
-    extraction = _read_markdown(student_file_path, os.path.join(prompts_dir, f"prompt_{prompt_slug}_images"),
-                                prompts_dir, args, ctx["markdown_config"])
-    student_images = extraction.images
-    image_warnings = list(ctx["reference_warnings"]) + list(extraction.warnings)
+    parts, student_images, image_warnings = [], [], list(ctx["reference_warnings"])
+    for i, path in enumerate(student_files):
+        suffix = f"_{i + 1}" if len(student_files) > 1 else ""
+        extraction = _read_markdown(path, os.path.join(prompts_dir, f"prompt_{prompt_slug}_images{suffix}"),
+                                    prompts_dir, args, ctx["markdown_config"])
+        markdown, images = extraction.markdown, extraction.images
+        if getattr(args, "pdf_pages_as_images", False) and path.lower().endswith(".pdf"):
+            images = render_pdf_pages(path)
+            markdown = (f"[Each of the {len(images)} pages of this PDF is attached as an image, in order: "
+                        f"use them for the figures, diagrams and tables.]\n\n{markdown}")
+        # The file name too: groups often name their members only there.
+        parts.append(f"--- File {i + 1} of {len(student_files)}: {os.path.basename(path)} ---\n{markdown}")
+        student_images.extend(images)
+        image_warnings.extend(extraction.warnings)
     if args.include_images:
         print(f"Extracted {len(student_images)} image(s) from student submission.")
 
-    prompt = build_grading_prompt(student_name, extraction.markdown, ctx["rubric"], ctx["example_review"],
+    prompt = build_grading_prompt(student_name, "\n\n".join(parts), ctx["rubric"], ctx["example_review"],
                                   ctx["reference_content"])
     images_for_model = _images_for_model(args, ctx["reference_images"], student_images, image_warnings)
     if args.include_images and not images_for_model and (student_images or ctx["reference_images"]):
@@ -348,9 +365,9 @@ def _grade_one(student_file_path, ctx, args, client):
             images=[(image.data, image.mime_type) for image in images_for_model],
             system=GRADING_SYSTEM,
             purpose="grade_submission",
-            context={"submission": os.path.basename(student_file_path)},
+            context={"submission": "; ".join(os.path.basename(p) for p in student_files)},
         )
-        structured_feedback = _feedback_record(response_text, meta, student_file_path, ctx["rubric"])
+        structured_feedback = _feedback_record(response_text, meta, student_files, ctx["rubric"])
         feedback_slug = get_submission_output_slug(student_name, student_file_path, structured_feedback)
         feedback_dir = os.path.join(ctx["session_folder"], 'feedback')
         os.makedirs(feedback_dir, exist_ok=True)
@@ -414,8 +431,16 @@ def grade_submissions(session_folder, students_dir, args):
         "rubric": rubric, "example_review": example_review, "reference_content": reference_content,
         "reference_images": reference_images, "reference_warnings": reference_warnings,
     }
-    for student_file_path in student_files:
-        _grade_one(student_file_path, ctx, args, client)
+    if getattr(args, "whole_submission", False):
+        submissions = {}
+        for path in student_files:
+            submissions.setdefault(get_submission_group_key(path, students_dir), []).append(path)
+        print(f"Grading {len(submissions)} submission(s), all their files in one prompt.")
+        groups = list(submissions.values())
+    else:
+        groups = [[path] for path in student_files]
+    for files in groups:
+        _grade_one(files, ctx, args, client)
 
 
 DESCRIPTION = "Automate the correction pipeline for assignment submissions."
@@ -446,6 +471,8 @@ def build_parser(parser: Optional[argparse.ArgumentParser] = None) -> argparse.A
     parser.add_argument("--max-images", type=int, default=20, help="Maximum extracted images to attach per LLM request. Use 0 for no limit.")
     parser.add_argument("--markdown-config", help="JSON object or path to a JSON file with document-to-Markdown converter options. For PDFs these are passed to pymupdf4llm.to_markdown.")
     parser.add_argument("--students-dir", help="Directory containing already unpacked student submissions. Defaults to <session_folder>/students.")
+    parser.add_argument("--pdf-pages-as-images", action="store_true", help="Attach every page of a submitted PDF as an image (with --include-images) instead of the images embedded in it: diagrams drawn as vector graphics are lost otherwise.")
+    parser.add_argument("--whole-submission", action="store_true", help="Grade all the matching files of a submission (e.g. a report PDF and its SQL script) in one prompt, instead of one prompt per file.")
     parser.add_argument("--extract-nested-zips", action="store_true", help="Extract zip files found inside the students directory before conversion/grading.")
     parser.add_argument("--output-dir", help="Output/session folder for single-file inputs. Defaults to the input file's parent folder.")
     add_hidden_alias(parser, "--not-cleanup-html", "no_cleanup_html", action="store_true")

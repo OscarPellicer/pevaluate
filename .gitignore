@@ -38,3 +38,6 @@ venv.bak/
 # OS Specific
 .DS_Store
 Thumbs.db
+
+# Local launch configurations (paths to real courses)
+.vscode/

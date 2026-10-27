@@ -17,6 +17,7 @@ the PoliformaT one, e.g. DNI digits) and then by name.
 """
 import argparse
 import csv
+import html
 import re
 import shutil
 import tempfile
@@ -168,6 +169,47 @@ def read_marks(path: str) -> list[dict]:
     return marks
 
 
+def read_feedback_dir(path: str) -> list[dict]:
+    """Marks of the submissions graded with ``pevaluate <folder>`` (one ``feedback_*.yaml`` each),
+    one row per student: whoever submitted it (the PoliformaT folder of the file, with its ID) and
+    every other member of the group named by the grader, all with the group's mark and feedback."""
+    import yaml
+
+    from .submissions import POLIFORMAT_FOLDER
+
+    marks = []
+    for yaml_path in sorted(Path(path).glob("feedback_*.yaml")):
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        mark = to_float(str(data.get("mark", "")).replace(",", "."))
+        feedback = str(data.get("feedback") or "").strip()
+        rows = []
+        folder = next((part for part in reversed(Path(str(data.get("submission_file", ""))).parts)
+                       if POLIFORMAT_FOLDER.match(part)), None)
+        if folder:
+            match = POLIFORMAT_FOLDER.match(folder)
+            surname, _, name = match.group("name").partition(",")
+            rows.append({"student_id": match.group("id").strip(), "name": f"{name.strip()} {surname.strip()}"})
+        for student in data.get("students") or []:
+            full_name = str(student.get("full_name", "") if isinstance(student, dict) else student).strip()
+            if full_name and not any(name_similarity(full_name, row["name"]) >= 70 for row in rows):
+                rows.append({"student_id": "", "name": full_name})
+        for row in rows:
+            marks.append({**row, "mark": mark, "feedback": feedback, "source": yaml_path.name})
+    return marks
+
+
+def feedback_html(text: str) -> str:
+    """The grader's feedback for comments.txt, which PoliformaT shows as HTML: paragraphs at
+    blank lines, line breaks kept, **bold** kept."""
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    rendered = []
+    for paragraph in paragraphs:
+        lines = [re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html.escape(line.rstrip()))
+                 for line in paragraph.splitlines()]
+        rendered.append("<p>" + "<br>\n".join(lines) + "</p>")
+    return "\n".join(rendered)
+
+
 def match_students(grades: GradesFile, marks: list[dict], name_threshold: float = 70.0) -> tuple[dict, list]:
     """{grade row index: marks row}, one-to-one: first by ID (one contains the other, e.g. the DNI
     digits inside a DNI read with its letter), then by the most similar name. Returns also the
@@ -196,12 +238,14 @@ def match_students(grades: GradesFile, marks: list[dict], name_threshold: float 
 
 # --- Building the upload -----------------------------------------------------------------------
 
-def build_poliformat_zip(download: str, marks_csv: str, output: str, feedback_pdfs: Optional[str] = None,
+def build_poliformat_zip(download: str, marks_csv: Optional[str], output: str, feedback_pdfs: Optional[str] = None,
                          lang: str = "es", comment: Optional[str] = None, attachment_name: Optional[str] = None,
-                         decimal_sep: str = ",", name_threshold: float = 70.0) -> dict:
+                         decimal_sep: str = ",", name_threshold: float = 70.0,
+                         feedback_dir: Optional[str] = None) -> dict:
     """Fill the download with grades, comments and feedback PDFs and zip it for "Subir todo".
+    The marks come from a CSV (``marks_csv``) or from graded submissions (``feedback_dir``).
     Returns a summary: matched students, students without mark, marks without student."""
-    marks = read_marks(marks_csv)
+    marks = read_feedback_dir(feedback_dir) if feedback_dir else read_marks(marks_csv)
     texts = COMMENTS.get(lang, COMMENTS["es"])
     with tempfile.TemporaryDirectory() as workdir:
         assignment_dir = _open_download(download, workdir)
@@ -235,7 +279,7 @@ def build_poliformat_zip(download: str, marks_csv: str, output: str, feedback_pd
             text = comment.format(mark=row[grades.grade_col]) if comment else " ".join(
                 [texts["mark"].format(mark=row[grades.grade_col])] + ([texts["pdf"]] if has_pdf else []))
             if item.get("feedback"):
-                text = f"{text}\n\n{item['feedback']}"
+                text = f"<p>{html.escape(text)}</p>\n{feedback_html(item['feedback'])}"
             (folder / "comments.txt").write_text(text, encoding="utf-8")
             if has_pdf:
                 attachments = next((folder / d for d in ATTACHMENTS_DIR_NAMES if (folder / d).is_dir()),
@@ -243,7 +287,8 @@ def build_poliformat_zip(download: str, marks_csv: str, output: str, feedback_pd
                 attachments.mkdir(exist_ok=True)
                 shutil.copyfile(pdf, attachments / pdf_name)
         matched_marks = {id(it) for it in matched.values()}
-        summary["unmatched_marks"] = [f"{m['name']} ({m['student_id']})" for m in marks if id(m) not in matched_marks]
+        summary["unmatched_marks"] = [f"{m['name']} ({m['student_id'] or m.get('source', '')})"
+                                      for m in marks if id(m) not in matched_marks]
 
         grades.write(grades_path)
         Path(output).parent.mkdir(parents=True, exist_ok=True)
@@ -263,7 +308,10 @@ def build_parser(parser: Optional[argparse.ArgumentParser] = None) -> argparse.A
                                                formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("download", help="The assignment's 'Descargar todo' zip (or its extracted folder), with "
                                          "'Archivo de calificaciones' and 'Incluir estudiantes que no han realizado un envío' ticked.")
-    parser.add_argument("--marks", required=True, help="overall_marks.csv from exam-open (or a combine-marks output): student_id, student_name, mark.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--marks", help="overall_marks.csv from exam-open (or a combine-marks output): student_id, student_name, mark.")
+    source.add_argument("--feedback-dir", help="feedback/ folder of submissions graded with 'pevaluate <folder>': each group's mark "
+                                               "and feedback go to whoever submitted and to every member named by the grader.")
     parser.add_argument("--feedback-pdfs", help="Folder with one PDF per student named <student_id>.pdf (exam-open's student_feedback_pdfs/), "
                                                 "attached to each student's comment.")
     parser.add_argument("--output", required=True, help="The zip to upload with 'Subir todo'.")
@@ -278,7 +326,8 @@ def build_parser(parser: Optional[argparse.ArgumentParser] = None) -> argparse.A
 def run(args: argparse.Namespace):
     summary = build_poliformat_zip(args.download, args.marks, args.output, feedback_pdfs=args.feedback_pdfs,
                                    lang=args.lang, comment=args.comment, attachment_name=args.attachment_name,
-                                   decimal_sep=args.decimal_sep, name_threshold=args.name_threshold)
+                                   decimal_sep=args.decimal_sep, name_threshold=args.name_threshold,
+                                   feedback_dir=args.feedback_dir)
     print(f"Assignment: {summary['assignment']}")
     print(f"Graded: {len(summary['matched'])} student(s)")
     for poliformat_name, our_name, our_id, method, score, grade in summary["matched"]:

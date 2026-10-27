@@ -61,3 +61,13 @@ def _read_pdf_images(file_path):
                 continue
             images.append(_image_from_bytes(f"{file_path}:page-{page_index}:{name}", data))
     return images
+
+
+def render_pdf_pages(file_path, dpi=110):
+    """Every page of a PDF as a PNG image, so the grader sees what the text extraction loses
+    (diagrams drawn as vector graphics, tables, layout)."""
+    import pymupdf
+
+    with pymupdf.open(file_path) as document:
+        return [_image_from_bytes(f"{file_path}#page={i + 1}", page.get_pixmap(dpi=dpi).tobytes("png"), mime_type="image/png")
+                for i, page in enumerate(document)]

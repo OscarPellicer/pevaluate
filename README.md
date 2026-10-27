@@ -497,6 +497,18 @@ pevaluate poliformat-zip "Tarea_20260101120000.zip" --marks correction/open/over
    - The grade goes into `grades.xls`/`grades.csv` with two decimals and a decimal comma (`--decimal-sep`); `comments.txt` gets "Nota: 8,60 sobre 10. La corrección de cada pregunta está en el PDF adjunto." (`--lang es|ca|en`, or your own text with `--comment "... {mark} ..."`, plus the `feedback` column when the marks file has one); the student's `<student_id>.pdf` goes into `Adjuntos al comentario/` (`--attachment-name`).
    - Student folders and grade rows are linked by the ID in brackets: folder names have no accents while `grades.xls` has them. Everything else in the download is kept as it was.
 
+   **Submissions (reports, SQL scripts, notebooks) graded from the same download.** Extract the *Descargar todo* zip and grade it in place: with a PoliformaT download as `--students-dir`, only the files in `Adjuntos de la entrega/` and a non-empty `..._submissionText.html` are graded (not `comments.txt`, `timestamp.txt`...), the student is taken from the `Apellido, Nombre(ID)` folder, and nested zips are extracted inside that folder. `--whole-submission` sends all the files of a submission in one prompt (e.g. the report PDF and its `base_datos.sql`), and `--pdf-pages-as-images` (with `--include-images`) attaches every PDF page as an image, so diagrams drawn as vector graphics are seen:
+
+```bash
+pevaluate grade entrega2 --students-dir "entrega2/students" --no-unzip --no-convert --whole-submission \
+    --files-regex '.*\.(pdf|sql|txt|docx|html)$' --prefer-extensions '' --include-images --pdf-pages-as-images \
+    --max-images 30 --rubric rubric.txt --example example.txt --no-reference --keep-prompt
+pevaluate poliformat-zip "Memoria_20260101120000.zip" --feedback-dir entrega2/feedback \
+    --output "Memoria_subir.zip"
+```
+
+   With `--feedback-dir`, each group's mark and feedback go to whoever submitted (by the ID of the folder) and to every member the grader names in `students` (by name), so the members who did not submit get them too. The feedback goes into `comments.txt` as HTML (paragraphs, line breaks, bold), after the mark. A student named in two submissions (a group that submitted twice) is matched once and the other is listed as not matched.
+
 4. Upload it with **Subir todo**: tick **Todas**, choose the **same format of the grades file** as in the download, and **No publicar información subida – Dejarlo para más tarde**. Check a couple of students in the grader (grade, comment, attachment), then **Publicar calificaciones**. The zip must stay under 200 MB, and the site language must be the one the download was made in.
 
    ![PoliformaT: Subir todo](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/poliformat_subir_todo.png)
