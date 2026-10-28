@@ -128,6 +128,7 @@ def write_evaluations_yaml(output_dir: str, result_rows: list[dict]):
             "status": row.get("status", ""),
             "graded_from": row.get("graded_from") or "box",
             "grader": row.get("grader") or {},
+            **({"pages": list(row["pages"])} if row.get("pages") else {}),  # exam-free: the student's whole pages
         })
     write_yaml(evaluations_yaml_path(output_dir), {"responses": responses})
 

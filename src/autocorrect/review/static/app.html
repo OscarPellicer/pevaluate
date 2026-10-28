@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisión de la corrección</title>
+<script>
+try { const t = JSON.parse(localStorage.getItem("review.theme") || '"system"'); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/app.css">
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']] },
+  options: { ignoreHtmlClass: '.*|', processHtmlClass: 'arithmatex' },
+  startup: { typeset: false }
+};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+<header id="top">
+  <a id="title" href="#/">…</a>
+  <select id="parts" hidden></select>
+  <nav id="nav"></nav>
+  <span id="status" role="status" aria-live="polite"></span>
+  <span id="actions"></span>
+  <select id="theme"></select>
+</header>
+<div id="offline" role="alert" hidden></div>
+<div id="banner"></div>
+<main id="main"><p class="muted">Cargando…</p></main>
+<footer id="closing" class="small muted"></footer>
+<dialog id="remind"><form method="dialog"><h2 id="remind-title"></h2><div id="remind-text"></div>
+  <div class="dialog-buttons"><button value="stay" id="remind-stay" class="primary"></button><button value="go" id="remind-go"></button><button value="never" id="remind-never"></button></div></form></dialog>
+<dialog id="dialog"><form method="dialog"><pre id="dialog-text"></pre><button>OK</button></form></dialog>
+<script src="/static/app.js"></script>
+</body>
+</html>

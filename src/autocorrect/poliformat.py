@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Optional
 
 from .common import read_csv_rows, safe_name, to_float
-from .names import name_similarity, normalize_student_id
+from .names import name_similarity
+from .roster import match_people
 
 DESCRIPTION = __doc__
 
@@ -214,25 +215,10 @@ def match_students(grades: GradesFile, marks: list[dict], name_threshold: float 
     """{grade row index: marks row}, one-to-one: first by ID (one contains the other, e.g. the DNI
     digits inside a DNI read with its letter), then by the most similar name. Returns also the
     list of (row index, mark row, method, score) for the record."""
-    pairs = []
-    for i, row in enumerate(grades.rows):
-        poliformat_id = normalize_student_id(row[grades.id_col])
-        for j, item in enumerate(marks):
-            our_id = normalize_student_id(item["student_id"])
-            if len(poliformat_id) >= 5 and len(our_id) >= 5 and (poliformat_id in our_id or our_id in poliformat_id):
-                pairs.append((200.0, i, j, "id"))
-            else:
-                score = name_similarity(grades.student_name(row), item["name"])
-                if score >= name_threshold:
-                    pairs.append((score, i, j, "name"))
-    matched, used_rows, used_marks, record = {}, set(), set(), []
-    for score, i, j, method in sorted(pairs, key=lambda p: -p[0]):
-        if i in used_rows or j in used_marks:
-            continue
-        matched[i] = marks[j]
-        used_rows.add(i)
-        used_marks.add(j)
-        record.append((i, marks[j], method, min(score, 100.0)))
+    people = [{"id": row[grades.id_col], "name": grades.student_name(row)} for row in grades.rows]
+    found = match_people(people, [{"id": m["student_id"], "name": m["name"]} for m in marks], name_threshold)
+    matched = {i: marks[j] for i, (j, _, _) in found.items()}
+    record = [(i, marks[j], method, score) for i, (j, method, score) in found.items()]
     return matched, record
 
 

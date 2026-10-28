@@ -6,6 +6,8 @@
     pevaluate combine-marks ...   lab + exam marks per student, and fill a gradebook export
     pevaluate moodle-csv ...      fill a Moodle assignment grading worksheet
     pevaluate poliformat-zip ...  build the 'Subir todo' zip of a PoliformaT (UPV) assignment
+    pevaluate roster ...          the class list of an LMS export as one CSV (id, name, email)
+    pevaluate review ...          local web app to review and edit the corrections
     pevaluate test-open ...       offline smoke test of the open-answer pipeline
 
 The API key goes in a .env file (e.g. ANTHROPIC_API_KEY, or the variable named by --api-key-env).
@@ -14,7 +16,8 @@ import argparse
 import sys
 from typing import Optional
 
-from . import combine_marks, exam_free, exam_open, lab, moodle, poliformat, smoke
+from . import combine_marks, exam_free, exam_open, lab, moodle, poliformat, roster, smoke
+from .review import cli as review
 
 # name: (module with build_parser/run, aliases, help)
 SUBCOMMANDS = {
@@ -24,6 +27,8 @@ SUBCOMMANDS = {
     "combine-marks": (combine_marks, ["combine"], "Combine lab and exam marks per student; fill a gradebook export."),
     "moodle-csv": (moodle, ["feedback-csv"], "Fill a Moodle assignment grading worksheet with marks and feedback."),
     "poliformat-zip": (poliformat, ["sakai-zip"], "Build the 'Subir todo' zip of a PoliformaT (UPV, Sakai) assignment: grades, comments, feedback PDFs."),
+    "roster": (roster, ["class-list"], "Write the class list of an LMS export as one CSV (id, name, email) for the course folder."),
+    "review": (review, [], "Local web app to review and edit the corrections (by question, by student, lab submissions)."),
     "test-open": (smoke, ["exam-open-test"], "Offline smoke test of the open-answer pipeline."),
 }
 DEFAULT_COMMAND = "grade"

@@ -514,6 +514,37 @@ pevaluate poliformat-zip "Memoria_20260101120000.zip" --feedback-dir entrega2/fe
    ![PoliformaT: Subir todo](https://raw.githubusercontent.com/OscarPellicer/pevaluate/refs/heads/main/media/poliformat_subir_todo.png)
 
 
+## Reviewing and editing the corrections (web app)
+
+`pevaluate review` opens a local web app (on 127.0.0.1 only, with a private token in the URL) where the teacher reviews what was graded and corrects it:
+
+```bash
+pevaluate review correction/open                      # an exam: open answers (+ the pexams folder they came from)
+pevaluate review correction/mc                        # multiple choice only (pexams correction folder)
+pevaluate review entrega2/feedback --roster "Memoria_20260101120000.zip"   # lab submissions + class list
+ptestgen course review P1                             # with a course record: everything filled in
+ptestgen course review P1 --part lab                  # several parts (exam, free = blank paper, lab): all in one app, chosen in the page; --part opens one first
+```
+
+- **Overview:** marks (mean, median, passed, histogram), one row per question (percentage right, blank/zero answers, discrimination, edited/flagged) and per student, and the class list: students without exam or submission, exams or members not in the list.
+- **By question:** the statement, options with the answer distribution (multiple choice) or the expected answer and rubric (open), then every student's answer: the scan crop (and the crop with its surroundings when there is writing outside the box), the transcription, the grader's warnings, and the score and feedback to edit, with a preview rendered as in the student PDFs (Markdown and LaTeX). Filters: flagged, edited, not reviewed.
+- **By student:** the mark, the corrected answer sheet, every multiple-choice answer (letters as printed in the student's model; a misread answer is fixed from a menu) and every open answer; the student read from the scan can be changed (with the names of the class list).
+- **Blank-paper exams** (`exam-free`): by student, the whole exam once (every page, scrollable) next to all its corrections; by question, each student's pages in a scrollable box. `exam-free` now keeps the pages of each exam in `open_evaluations.yaml` (`pages`); for earlier results they are found from `--pages-per-exam`.
+- **To review:** the answers flagged by `exam-open` (`needs_review.csv` reasons), students not in the class list, sheets with two boxes filled.
+- **Lab submissions:** one submission at a time (a list of all the groups, arrows, *Reviewed and next*), with resizable panes: its files side by side with its grade (PDF, notebooks rendered, SQL and other code, Word, images), the members of the group (editable; matched to the class list), the mark and the feedback, previewed as the LMS shows the comment; by student, where each student of the class list is (no submission, in two submissions).
+
+The page has a help section, a light/dark/system theme, and reminds the teacher (once per session, can be turned off) to tick *Reviewed* before moving on.
+
+Edits are written at once to the fields a teacher may edit by hand: the top-level `score`/`feedback` in `open_evaluations.yaml`, `mark`/`feedback`/`students` in a lab feedback YAML, the answers and the student of a scanned exam in `correction_results.csv` (a new ID is carried to the open-answer grades and the crops index, so nothing is graded again). The `grader` blocks are never touched, so `ptestgen course edits` still measures the teacher's changes; for old results without the model's grade in their `grader` block, the first value seen is kept in `review_state.json`, which also stores the "reviewed" ticks. A save is refused if the file changed on disk since the page loaded it (another tool, an agent), and the first save keeps a copy (`<file>.before_review`).
+
+The banner says when the marks and PDFs are older than the edits. **Rebuild** reruns the last `exam-open`/`exam-free` command from its `run_manifest.json` (saved grades only: it refuses if an answer has no saved grade, which would be graded with the LLM). With `ptestgen course review`, the buttons run the assessment's own steps instead (when it has several parts, rebuilding the upload files first rebuilds the marks of every part, so the combined marks are never stale): the analysis (`only_analysis`, never the scan reading) and the open-answer grading, then the steps that build the files to upload, and the edits are written to the course record.
+
+The server stops by itself when the page is closed (`--keep-open` keeps it running). With `ptestgen course review`, every saved edit is also written to the course record (`edits`).
+
+`pevaluate roster <export> --output lista_clase.csv` writes the class list of an LMS export as one CSV (`id`, `name`, `email`) to keep in the course folder; pexams takes it as `--input-csv lista_clase.csv --id-column id --name-column name` to identify every exam against it while correcting.
+
+`--roster` accepts a PoliformaT *Descargar todo* (zip, folder or its `grades.xls`/`grades.csv`), a Moodle export, or any CSV/XLSX with ID and name columns (with a course record, its `roster.id_column`/`name_column` name them). It is optional; with it, every exam and every group member is matched to a real student (by ID, then by name).
+
 ## Traceability
 
 Every output folder records how it was produced:
