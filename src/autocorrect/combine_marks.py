@@ -60,6 +60,9 @@ def build_parser(parser=None):
     parser.add_argument("--lab-weight", type=float, default=0.3, help="Weight of the lab (notebook) mark in the final mark.")
     parser.add_argument("--exam-weight", type=float, default=0.7, help="Weight of the exam mark in the final mark.")
     parser.add_argument("--notice", default="", help="Text appended to every student's feedback (e.g. a warning for next time).")
+    parser.add_argument("--override", action="append", default=[], metavar="NAME=MARK: REASON",
+                        help="Set a student's final mark, e.g. 'Ana Pérez=0: Copia del notebook de otro grupo.' "
+                             "The feedback then shows only the reason and the mark. Repeat for several students.")
     parser.add_argument("--lang", choices=["es", "en"], default="es", help="Language of the composed feedback.")
     parser.add_argument("--roster", help="Grade file to fill (CSV or Excel), e.g. a Moodle gradebook export.")
     parser.add_argument("--roster-id-column", default="Número de identificación")
@@ -97,11 +100,14 @@ def run(args):
 
     # Exams: sum the question scores of each exam.
     for scores_csv in args.exam_scores:
+        voided = _voided_questions(scores_csv)
         exams = defaultdict(list)
         for row in read_csv_rows(scores_csv):
             exams[(row["student_id"], row["student_name"])].append(row)
         for (student_id, name), rows in exams.items():
             student = roster.get(name or student_id)
+            # Questions voided for this student (exam-open --void-questions[-nicely]) do not count.
+            rows = [r for r in rows if str(r["question_id"]) not in voided.get(student_id, set())]
             rows.sort(key=lambda r: r["question_id"])
             score = sum(float(r["score"] or 0) for r in rows)
             max_score = sum(float(r["max_score"] or 0) for r in rows)
@@ -130,8 +136,19 @@ def run(args):
             parts += ["", args.notice]
         student["feedback"] = "\n".join(parts)
 
+    for override in args.override:
+        name, _, rest = override.partition("=")
+        mark, _, reason = rest.partition(":")
+        matches = [s for s in roster.students if similarity(name.strip(), s["name"]) >= args.threshold]
+        if not name.strip() or not mark.strip() or not matches:
+            raise SystemExit(f"--override '{override}': expected 'NAME=MARK: REASON' with a known student name.")
+        student = max(matches, key=lambda s: similarity(name.strip(), s["name"]))
+        student["final_mark"] = round(float(mark), 2)
+        student["override"] = reason.strip() or "-"
+        student["feedback"] = "\n".join(p for p in (reason.strip(), f"{labels['final']}: {float(mark):g}/10") if p)
+
     fields = ["name", "aliases", "final_mark", "lab_mark", "exam_mark", "exam_score", "feedback", "lab_feedback", "exam_feedback",
-              "lab_conflict", "lab_group", "lab_source", "exam_id", "exam_source"]
+              "lab_conflict", "lab_group", "lab_source", "exam_id", "exam_source", "override"]
     rows = sorted(roster.students, key=lambda s: normalize_name(s["name"]))
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields, delimiter=";", extrasaction="ignore")
@@ -142,8 +159,23 @@ def run(args):
     print("Without lab mark:", ", ".join(s["name"] for s in rows if "lab_mark" not in s) or "-")
     print("Two lab submissions:", ", ".join(s["name"] for s in rows if s.get("lab_conflict")) or "-")
     print("Without exam:", ", ".join(s["name"] for s in rows if "exam_mark" not in s) or "-")
+    print("Overridden:", ", ".join(f"{s['name']} ({s['final_mark']:g})" for s in rows if s.get("override")) or "-")
     if args.roster:
         fill_roster(args, rows)
+
+
+def _voided_questions(scores_csv) -> dict:
+    """{student_id: {question ids}} voided per student, from the overall_marks.csv that
+    exam-open writes next to open_scores.csv (open_scores.csv keeps every graded answer)."""
+    path = os.path.join(os.path.dirname(scores_csv), "overall_marks.csv")
+    if not os.path.exists(path):
+        return {}
+    voided = {}
+    for row in read_csv_rows(path, encoding="utf-8-sig"):
+        ids = {q.strip() for q in re.split(r"[,;\s]+", str(row.get("voided_questions") or "")) if q.strip()}
+        if ids:
+            voided[str(row.get("student_id", ""))] = ids
+    return voided
 
 
 def _digits(value) -> str:

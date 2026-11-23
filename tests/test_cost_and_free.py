@@ -48,6 +48,22 @@ def test_compact_notebook_truncates_long_output():
     assert "characters omitted" in out and "line 0" in out and "line 4999" in out and len(out) < 1200
 
 
+def test_compact_notebook_merges_progress_bar_outputs():
+    """Thousands of tiny stream outputs (Lightning/tqdm progress bars) end up as one short output."""
+    nb = nbformat.v4.new_notebook()
+    cell = nbformat.v4.new_code_cell("trainer.fit(model)")
+    bars = [nbformat.v4.new_output("stream", name="stdout", text=f"\rEpoch {i // 100}: {i % 100}%|###| {i}/10000 [00:01<00:00]")
+            for i in range(10000)]
+    cell.outputs = ([nbformat.v4.new_output("stream", name="stderr", text="GPU available: False\n")] + bars
+                    + [nbformat.v4.new_output("execute_result", data={"text/plain": "{'test_acc': 0.81}"})])
+    nb.cells = [cell]
+    outputs = compact_notebook(nb, max_output_chars=3000).cells[0].outputs
+    assert [o["output_type"] for o in outputs] == ["stream", "stream", "execute_result"]
+    assert "GPU available" in outputs[0]["text"]
+    assert len(outputs[1]["text"]) < 3200 and "9999/10000" in outputs[1]["text"]
+    assert "\r" not in outputs[1]["text"]
+
+
 class _MoodleZipInfo(zipfile.ZipInfo):
     """Writes UTF-8 names without the zip UTF-8 flag, as Moodle does."""
     __slots__ = ()
@@ -145,6 +161,22 @@ def test_combine_marks_merges_names_and_pairs(tmp_path, capsys):
     assert rows["Ana Pérez Gil"]["exam_mark"] == "7.5" and rows["Ana Pérez Gil"]["lab_mark"] == "8.5"
     assert rows["Luis Soler"]["lab_conflict"] and rows["Luis Soler"]["exam_mark"] == ""
     assert "Two lab submissions: Luis Soler" in capsys.readouterr().out
+    # --override sets the final mark and replaces the feedback with the reason.
+    combine_main(["--lab-feedback", str(feedback), "--exam-scores", str(scores), "--output", str(output),
+                  "--override", "Luis Soler=0: Copia del notebook de otro grupo."])
+    rows = {r["name"]: r for r in csv.DictReader(open(output, encoding="utf-8-sig"), delimiter=";")}
+    assert rows["Luis Soler"]["final_mark"] == "0.0" and rows["Luis Soler"]["feedback"].startswith("Copia del notebook")
+    assert rows["Ana Pérez Gil"]["override"] == "" and float(rows["Ana Pérez Gil"]["final_mark"]) > 0
+    with pytest.raises(SystemExit):
+        combine_main(["--lab-feedback", str(feedback), "--exam-scores", str(scores), "--output", str(output), "--override", "Nadie=0: x"])
+    # A question voided for a student in overall_marks.csv (exam-open --void-questions-nicely) does not count.
+    with open(tmp_path / "overall_marks.csv", "w", newline="", encoding="utf-8-sig") as f:  # BOM, as exam-open writes it
+        w = csv.DictWriter(f, fieldnames=["student_id", "student_name", "mark", "voided_questions"])
+        w.writeheader()
+        w.writerow({"student_id": "1", "student_name": "ANA PEREZ GIL", "mark": "10", "voided_questions": "2"})
+    combine_main(["--lab-feedback", str(feedback), "--exam-scores", str(scores), "--output", str(output)])
+    rows = {r["name"]: r for r in csv.DictReader(open(output, encoding="utf-8-sig"), delimiter=";")}
+    assert rows["Ana Pérez Gil"]["exam_mark"] == "10.0" and rows["Ana Pérez Gil"]["exam_score"] == "1 / 1"
 
 
 def test_llm_module_identical_to_pexams_copy():

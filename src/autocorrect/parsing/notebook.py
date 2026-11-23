@@ -28,14 +28,49 @@ def _shorten(text, max_chars):
     return text
 
 
+def _resolve_carriage_returns(text):
+    """Keep what a terminal shows: a line rewritten with \\r (progress bars) keeps its last
+    non-empty version."""
+    lines = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if "\r" in line:
+            parts = [part for part in line.split("\r") if part.strip()]
+            line = parts[-1] if parts else ""
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _merge_streams(outputs):
+    """Join consecutive stream outputs of the same stream (stdout/stderr) into one. Progress
+    bars (tqdm, PyTorch Lightning) can save thousands of tiny outputs in one cell, which the
+    per-output truncation would not catch."""
+    merged = []
+    for output in outputs:
+        if (output.get("output_type") == "stream" and merged
+                and merged[-1].get("output_type") == "stream"
+                and merged[-1].get("name") == output.get("name")):
+            previous = merged[-1]["text"] if isinstance(merged[-1]["text"], str) else "".join(merged[-1]["text"])
+            current = output.get("text", "")
+            merged[-1]["text"] = previous + (current if isinstance(current, str) else "".join(current))
+        else:
+            if output.get("output_type") == "stream" and not isinstance(output.get("text", ""), str):
+                output["text"] = "".join(output["text"])
+            merged.append(output)
+    return merged
+
+
 def compact_notebook(nb, max_output_chars=3000):
     """Make a notebook cheaper to send to an LLM without losing what a grader needs:
-    plain text instead of HTML when an output has both (pandas tables), repeated lines
+    plain text instead of HTML when an output has both (pandas tables), consecutive stream
+    outputs merged, progress-bar redraws (\\r) reduced to their final state, repeated lines
     collapsed and very long outputs (e.g. thousands of warnings) truncated."""
     for cell in nb.cells:
         if cell.get("cell_type") != "code":
             continue
+        cell["outputs"] = _merge_streams(cell.get("outputs", []))
         for output in cell.get("outputs", []):
+            if output.get("output_type") == "stream":
+                output["text"] = _resolve_carriage_returns(output.get("text", ""))
             kind = output.get("output_type")
             if kind == "stream":
                 output["text"] = _shorten(output.get("text", ""), max_output_chars)
