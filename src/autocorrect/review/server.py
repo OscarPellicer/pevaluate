@@ -5,6 +5,7 @@ buttons. It listens on 127.0.0.1 only, and every request needs the token of the 
 """
 import html
 import json
+import logging
 import mimetypes
 import os
 import secrets
@@ -201,8 +202,11 @@ class ReviewServer:
                 self.send_header("Cache-Control", "no-store")
                 for k, v in (extra or {}).items():
                     self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the page moved on (e.g. to the next submission) before this response arrived
 
             def _json(self, code: int, data):
                 self._send(code, json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"),
@@ -309,6 +313,10 @@ class ReviewServer:
             print("\nStopped.")
         finally:
             httpd.server_close()
+
+
+# nbconvert warns about every notebook image without alt text: noise in the teacher's terminal.
+logging.getLogger("traitlets").setLevel(logging.ERROR)
 
 
 def serve(cfg: Optional[ReviewConfig] = None, port: int = 0, open_browser: bool = True,

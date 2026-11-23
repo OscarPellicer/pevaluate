@@ -29,7 +29,9 @@ const T = {
     shortcut_help: "Ctrl+Enter guarda la tarjeta en la que estás escribiendo.",
     range: "Mín. – máx.", progress: "Progreso de la revisión", reviewed_plural: "revisadas", edited_plural: "editadas",
     flagged_pending: "con avisos sin revisar", open_answers: "respuestas abiertas", help: "Ayuda", theme: "Tema",
-    theme_system: "Tema del sistema", theme_light: "Claro", theme_dark: "Oscuro",
+    theme_system: "Tema del sistema", theme_light: "Claro", theme_dark: "Oscuro", language: "Idioma",
+    part_labels: { exam: "Examen (hoja impresa)", free: "Examen (folio en blanco)", lab: "Prácticas" },
+    action_labels: { marks: "Reconstruir notas y PDF", upload: "Reconstruir ficheros para subir" },
     rubric_auto: "automática (según la pantalla)", rubric_right: "a la derecha", rubric_below: "debajo del comentario", rubric_hidden: "oculta",
     drag: "Arrastra para cambiar el tamaño", reviewed_next: "Revisada y siguiente →", reviewed_last: "Marcar como revisada",
     remind_title: "¿Dejas esta sin marcar como revisada?",
@@ -43,7 +45,7 @@ const T = {
       ["Reconstruir", "<p>Las notas finales, los PDF de los estudiantes y los ficheros para subir se generan a partir de lo que editas. Cuando el aviso amarillo diga que hay cambios pendientes, pulsa <strong>Reconstruir</strong>. No se vuelve a llamar al modelo ni a leer los escaneos.</p>"],
       ["Si algo falla", "<p>Si otra herramienta o un agente cambia un fichero mientras tienes la página abierta, al guardar verás un aviso: recarga la página y vuelve a hacer el cambio. Antes del primer cambio se guarda una copia de cada fichero (<code>.before_review</code>). Para cambios de rúbrica, anular preguntas o volver a corregir, pídeselo al agente.</p>"],
     ],
-    part: "Parte", unsaved_switch: "Hay cambios sin guardar. ¿Cambiar de parte y perderlos?",
+    part: "Parte",
     show_label: "Mostrar", sort_label: "Orden", mark_shown: "Marcar las {n} mostradas como revisadas",
     mark_shown_title: "Marca como revisadas todas las respuestas que se ven ahora con el filtro elegido (no cambia ninguna nota).",
     ctrl_enter: "Ctrl+Enter guarda", confidence: "confianza", confidence_title: "Confianza del corrector en su lectura y nota (0–1); por debajo de 0,75 se marca para revisar.",
@@ -88,7 +90,9 @@ const T = {
     shortcut_help: "Ctrl+Enter saves the card you are typing in.",
     range: "Min – max", progress: "Review progress", reviewed_plural: "reviewed", edited_plural: "edited",
     flagged_pending: "flagged, not reviewed", open_answers: "open answers", help: "Help", theme: "Theme",
-    theme_system: "System theme", theme_light: "Light", theme_dark: "Dark",
+    theme_system: "System theme", theme_light: "Light", theme_dark: "Dark", language: "Language",
+    part_labels: { exam: "Exam (printed sheet)", free: "Exam (blank paper)", lab: "Lab work" },
+    action_labels: { marks: "Rebuild marks and PDFs", upload: "Rebuild upload files" },
     rubric_auto: "automatic (by screen size)", rubric_right: "on the right", rubric_below: "below the feedback", rubric_hidden: "hidden",
     drag: "Drag to resize", reviewed_next: "Reviewed and next →", reviewed_last: "Mark as reviewed",
     remind_title: "Leave this one without marking it as reviewed?",
@@ -102,7 +106,7 @@ const T = {
       ["Rebuild", "<p>Final marks, student PDFs and upload files are built from what you edit. When the yellow banner says there are pending changes, press <strong>Rebuild</strong>. The model is not called again and the scans are not read again.</p>"],
       ["If something fails", "<p>If another tool or an agent changes a file while the page is open, saving shows a warning: reload and make the change again. A copy of each file is kept before your first change (<code>.before_review</code>). For rubric changes, voiding questions or regrading, ask the agent.</p>"],
     ],
-    part: "Part", unsaved_switch: "There are unsaved changes. Switch part and lose them?",
+    part: "Part",
     show_label: "Show", sort_label: "Order", mark_shown: "Mark the {n} shown as reviewed",
     mark_shown_title: "Marks as reviewed every answer shown now with the chosen filter (no mark changes).",
     ctrl_enter: "Ctrl+Enter saves", confidence: "confidence", confidence_title: "The grader's confidence in its reading and grade (0–1); below 0.75 it is flagged for review.",
@@ -153,11 +157,21 @@ async function api(path, body) {
   return data;
 }
 
+// Language of the page: the one chosen in the top bar (remembered), else the assessment's.
+const LANG_NAMES = { es: "Español", en: "English" };
+function uiLang() {
+  const chosen = pref("lang", null);
+  return chosen in T ? chosen : (M && M.lang in T ? M.lang : "es");
+}
+
 async function loadModel() {
-  M = await api("/api/model");
+  const wanted = PART;
+  const model = await api("/api/model");
+  if (wanted !== PART) return false;  // the part changed meanwhile: that load is the one to show
+  M = model;
   PART = M.part;
-  L = T[M.lang] || T.es;
-  document.documentElement.lang = M.lang in T ? M.lang : "es";
+  L = T[uiLang()];
+  document.documentElement.lang = uiLang();
   M.Q = byKey(M.questions);
   M.S = byKey(M.students);
   M.A = byKey(M.answers);
@@ -169,7 +183,15 @@ function typeset(el) {
 
 function isReviewed(key) { return !!(M.reviewed && M.reviewed[key]); }
 
+const inflight = new Set();  // saves still running (a part switch waits for them)
+
 async function save(kind, body, label) {
+  const done = saveNow(kind, body, label);
+  inflight.add(done);
+  try { return await done; } finally { inflight.delete(done); }
+}
+
+async function saveNow(kind, body, label) {
   status(L.saving);
   try {
     await api(`/api/edit/${kind}`, body);
@@ -273,7 +295,7 @@ function renderShell() {
   const partSelect = $("#parts");
   partSelect.hidden = !(M.parts && M.parts.length > 1);
   if (!partSelect.hidden) {
-    partSelect.innerHTML = M.parts.map((x) => `<option value="${esc(x.id)}" ${x.id === M.part ? "selected" : ""}>${esc(x.label)}</option>`).join("");
+    partSelect.innerHTML = M.parts.map((x) => `<option value="${esc(x.id)}" ${x.id === M.part ? "selected" : ""}>${esc(L.part_labels[x.id] || x.label)}</option>`).join("");
     partSelect.setAttribute("aria-label", L.part);
     partSelect.onchange = () => switchPart(partSelect.value);
   }
@@ -288,6 +310,15 @@ function renderShell() {
     .map(([v, l]) => `<option value="${v}" ${theme === v ? "selected" : ""}>${esc(l)}</option>`).join("");
   $("#theme").setAttribute("aria-label", L.theme);
   $("#theme").onchange = (ev) => { setPref("theme", ev.target.value); applyTheme(ev.target.value); };
+  const lang = uiLang();
+  $("#lang").innerHTML = Object.entries(LANG_NAMES).map(([v, name]) => `<option value="${v}" ${lang === v ? "selected" : ""}>${esc(name)}</option>`).join("");
+  $("#lang").setAttribute("aria-label", L.language);
+  $("#lang").onchange = (ev) => {
+    setPref("lang", ev.target.value);
+    L = T[uiLang()];
+    document.documentElement.lang = uiLang();
+    render(false);
+  };
   const banner = $("#banner");
   const parts = [];
   if (M.stale.length) parts.push(`<strong>${esc(L.stale)}</strong> <span>${M.stale.map(esc).join(" ")}</span>`);
@@ -296,7 +327,7 @@ function renderShell() {
   $("#closing").innerHTML = `${esc(L.closing_notice)} <code>${esc(M.rerun || "")}</code>`;
   // Rebuild buttons live in the top bar; highlighted while there are changes not yet rebuilt.
   const actions = $("#actions");
-  actions.innerHTML = M.rebuild.map((a) => `<button data-rebuild="${esc(a.id)}" class="${M.stale.length && a.id === "marks" ? "primary" : ""}" title="${esc(a.description)}">${esc(a.label)}</button>`).join("");
+  actions.innerHTML = M.rebuild.map((a) => `<button data-rebuild="${esc(a.id)}" class="${M.stale.length && a.id === "marks" ? "primary" : ""}" title="${esc(a.description)}">${esc(L.action_labels[a.id] || a.label)}</button>`).join("");
   actions.querySelectorAll("[data-rebuild]").forEach((b) => b.addEventListener("click", () => rebuild(b.dataset.rebuild, b)));
 }
 
@@ -322,7 +353,15 @@ async function rebuild(id, button) {
 }
 
 async function switchPart(part) {
-  if (Object.values(drafts).some((d) => d.dirty) && !confirm(L.unsaved_switch)) { $("#parts").value = PART; return; }
+  // Like "Reviewed and next": finish the saves under way and save pending edits, then switch.
+  const select = $("#parts");
+  select.disabled = true;
+  try {
+    await Promise.allSettled([...inflight]);
+    for (const key of Object.keys(drafts).filter((k) => drafts[k].dirty)) {
+      if (!(await saveDraft(key))) { select.value = PART; return; }  // the error is in the status bar
+    }
+  } finally { select.disabled = false; }
   Object.keys(drafts).forEach((k) => delete drafts[k]);
   PART = part;
   setPref(`part.${M.title}`, part);
@@ -1017,7 +1056,7 @@ function bind(root) {
       previewTimer = setTimeout(async () => {
         try {
           const { html } = await api("/api/markdown", { text: el.value, mode: M.kind === "lab" ? "comment" : "markdown" });
-          drafts[key].preview = html;
+          if (drafts[key]) drafts[key].preview = html;  // saved meanwhile: nothing to keep
           const box = document.querySelector(`[data-preview="${CSS.escape(key)}"]`);
           if (box) { box.hidden = false; box.innerHTML = html; typeset(box); }
         } catch (e) { /* preview only */ }

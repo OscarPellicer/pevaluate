@@ -30,7 +30,7 @@ header#top { position: sticky; top: 0; z-index: 10; display: flex; gap: .8rem; a
 #nav a { padding: .25rem .6rem; border-radius: 6px; color: var(--muted); }
 #nav a.active { background: var(--accent-soft); color: var(--accent); }
 #status { margin-left: auto; color: var(--muted); font-size: .9em; }
-#theme { font-size: .85em; }
+#theme, #lang { font-size: .85em; }
 #parts { font-weight: 600; }
 #actions { display: flex; gap: .4rem; }
 #actions button { font-size: .85em; white-space: nowrap; }
