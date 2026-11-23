@@ -197,8 +197,22 @@ def _model_input_path(output_dir: str, row: dict, model_input_dir: Optional[str]
     return _highlight_model_input(row.get("crop_path", ""), output_dir, row)
 
 
-def _read_existing_result(output_dir: str, row: dict) -> Optional[dict]:
-    return load_evaluations_yaml(output_dir).get((str(row.get("student_id", "")), str(row.get("question_id", ""))))
+def _key(row: dict) -> tuple[str, str]:
+    return str(row.get("student_id", "")), str(row.get("question_id", ""))
+
+
+def _read_existing_result(output_dir: str, row: dict, saved: Optional[dict] = None) -> Optional[dict]:
+    return (load_evaluations_yaml(output_dir) if saved is None else saved).get(_key(row))
+
+
+def _progress_rows(rows: list[dict], saved: dict) -> list[dict]:
+    """What to save mid-run: the rows done so far, plus the saved grades not reached yet (as they
+    were), so an interrupted run, or one that regrades only some answers, loses nothing."""
+    done = {_key(r) for r in rows}
+    rest = [{**item, "conversion_warnings": "; ".join(item.get("conversion_warnings") or [])
+             if isinstance(item.get("conversion_warnings"), list) else item.get("conversion_warnings", "")}
+            for key, item in saved.items() if key not in done]
+    return rows + rest
 
 
 def _open_client(model, effort, api_key_env, output_dir, index_csv, exam_dir):
@@ -236,10 +250,10 @@ def _empty_result(base_result: dict, feedback: str = "") -> dict:
 
 
 def _grade_response(row, question, base_result, context_path, model_image, prompt, *, output_dir, client, model,
-                    dry_run, force_regrade, regrade_outside_box, max_image_width) -> tuple[dict, str]:
+                    dry_run, force_regrade, regrade_outside_box, max_image_width, saved=None) -> tuple[dict, str]:
     """``(result, status)``: the saved grade (``cached``, teacher edits included), or a new one
     from the model (``graded``), or ``pending`` (dry run) / ``error``."""
-    existing_result = None if force_regrade else _read_existing_result(output_dir, row)
+    existing_result = None if force_regrade else _read_existing_result(output_dir, row, saved)
     if (existing_result is not None and regrade_outside_box and context_path
             and (existing_result.get("graded_from") or "box") != "context"):
         existing_result = None  # graded from the box alone, before its overflow was seen
@@ -300,13 +314,16 @@ def evaluate_open_responses(
     api_key_env: Optional[str] = None,
     max_image_width: Optional[int] = 900,
     regrade_outside_box: bool = False,
+    regrade_questions: Optional[list] = None,
 ) -> str:
     """Grade every crop of the pexams index (reusing grades already in open_evaluations.yaml).
 
     Answers with writing outside their box (pexams ``ink_outside_box=yes``) are graded from the
     context crop with the box outlined. ``regrade_outside_box`` regrades only those that were
     graded from the box alone (e.g. before pexams detected the overflow); ``force_regrade``
-    regrades everything and discards teacher edits. Also writes ``needs_review.csv``.
+    regrades everything and discards teacher edits; ``regrade_questions`` (exam numbers or
+    original ids) does that only for those questions, e.g. after changing their rubric.
+    Also writes ``needs_review.csv``.
     """
     os.makedirs(output_dir, exist_ok=True)
     prompts_dir = os.path.join(output_dir, "prompts")
@@ -318,6 +335,8 @@ def evaluate_open_responses(
     if not dry_run and client is None:
         client = _open_client(model, effort, api_key_env, output_dir, index_csv, exam_dir)
 
+    regrade_ids = {str(q).strip() for q in (regrade_questions or []) if str(q).strip()}
+    saved = load_evaluations_yaml(output_dir)  # read once: the progress saves below rewrite the file
     result_rows = []
     for row in rows:
         question = questions_by_model.get(str(row.get("model_id", "")), {}).get(str(row.get("question_id", "")))
@@ -341,8 +360,10 @@ def evaluate_open_responses(
 
         result, status = _grade_response(
             row, question, base_result, context_path, model_image, prompt, output_dir=output_dir, client=client,
-            model=model, dry_run=dry_run, force_regrade=force_regrade, regrade_outside_box=regrade_outside_box,
-            max_image_width=max_image_width)
+            model=model, dry_run=dry_run,
+            force_regrade=force_regrade or bool({base_result["question_id"], base_result["original_id"]} & regrade_ids),
+            regrade_outside_box=regrade_outside_box,
+            max_image_width=max_image_width, saved=saved)
 
         if context_path:
             model_input_path = model_image
@@ -350,7 +371,7 @@ def evaluate_open_responses(
             model_input_path = _model_input_path(output_dir, {**row, "crop_path": crop_path}, model_input_dir)
         if status == "graded":
             # Save progress after every new grade, so an interrupted run loses nothing.
-            write_evaluations_yaml(output_dir, result_rows + [{**base_result, **result, "status": status}])
+            write_evaluations_yaml(output_dir, _progress_rows(result_rows + [{**base_result, **result, "status": status}], saved))
         result_rows.append(_result_row(base_result, result, status, model_input_path, output_dir))
 
     return _write_outputs(output_dir, result_rows)
@@ -487,6 +508,7 @@ def build_parser(parser: Optional[argparse.ArgumentParser] = None) -> argparse.A
     parser.add_argument("--student-converted-response", action="store_true", help="Also include the transcribed (converted) response in the per-student feedback PDFs. Off by default; the global report always includes it.")
     parser.add_argument("--void-questions", default=None, help="Comma-separated open questions (exam number or original id) removed for everyone. Void multiple-choice questions with pexams --void-questions.")
     parser.add_argument("--void-questions-nicely", default=None, help="Comma-separated open questions that count for a student only if they raise the student's overall mark (multiple choice from --mc-correction-dir included). Void multiple-choice questions with pexams --void-questions-nicely.")
+    parser.add_argument("--regrade-questions", default=None, help="Comma-separated open questions (exam number or original id) to grade again, e.g. after changing their rubric in the exam's questions JSON. Their saved grades and teacher edits are discarded; other questions are kept.")
     parser.add_argument("--regrade-outside-box", action="store_true", help="Regrade only the answers with writing outside their box (pexams ink_outside_box=yes) that were graded from the box alone; other grades and teacher edits are kept.")
     parser.add_argument("--lang", default="en", choices=sorted(STUDENT_TEXTS), help="Language of the per-student feedback PDFs (default: en).")
     return parser
@@ -503,6 +525,7 @@ def run(args: argparse.Namespace):
         force_regrade=args.force_regrade,
         max_image_width=args.max_image_width or None,
         regrade_outside_box=args.regrade_outside_box,
+        regrade_questions=[q for q in (args.regrade_questions or "").split(",") if q.strip()],
         **llm_options,
     )
     report_path = generate_open_response_report(output_csv, args.output_dir, mc_correction_dir=args.mc_correction_dir,

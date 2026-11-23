@@ -69,3 +69,30 @@ def test_exam_free_keeps_llm_grade_after_teacher_edit(tmp_path):
     exam_free.evaluate_free_exams(str(pages), str(exam_dir), str(out), client=client)
     item = yaml.safe_load(path.read_text(encoding="utf-8"))["responses"][0]
     assert (item["score"], item["grader"]["score"], item["grader"]["model"]) == (1, 0.25, "claude-opus-5-5")
+
+
+def test_exam_open_regrade_questions_discards_only_those_grades(tmp_path):
+    exam_dir = tmp_path / "exam"; exam_dir.mkdir()
+    questions = [{"id": i, "original_id": f"q{i}", "text": "?", "points": 1, "expected_answer": "X", "rubric": "- 100 %: X"} for i in (1, 2)]
+    (exam_dir / "exam_model_1_questions.json").write_text(json.dumps({"questions": questions}), encoding="utf-8")
+    Image.new("RGB", (400, 100), "white").save(tmp_path / "crop.png")
+    index = tmp_path / "index.csv"
+    with open(index, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["student_id", "student_name", "model_id", "question_id", "original_id", "crop_path", "points"])
+        w.writeheader()
+        for q in (1, 2):
+            w.writerow({"student_id": "1", "student_name": "Ana", "model_id": "1", "question_id": str(q), "original_id": f"q{q}",
+                        "crop_path": "crop.png", "points": "1"})
+    client = _FakeLLMClient({"score": 0.5, "max_score": 1, "feedback": "Falta X.", "response_markdown": "a", "confidence": 0.9})
+    out = tmp_path / "out"
+    evaluate_open_responses(str(index), str(exam_dir), str(out), client=client)
+    path = out / "open_evaluations.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for item in data["responses"]:
+        item["score"] = 1  # teacher edits on both questions
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    client.reply = {**client.reply, "score": 0.75}
+    evaluate_open_responses(str(index), str(exam_dir), str(out), client=client, regrade_questions=["q1"])
+    items = {str(i["question_id"]): i for i in yaml.safe_load(path.read_text(encoding="utf-8"))["responses"]}
+    assert client.calls == 3
+    assert items["1"]["score"] == 0.75 and items["2"]["score"] == 1
