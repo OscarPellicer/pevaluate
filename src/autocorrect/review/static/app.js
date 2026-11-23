@@ -31,7 +31,7 @@ const T = {
     flagged_pending: "con avisos sin revisar", open_answers: "respuestas abiertas", help: "Ayuda", theme: "Tema",
     theme_system: "Tema del sistema", theme_light: "Claro", theme_dark: "Oscuro",
     rubric_auto: "automática (según la pantalla)", rubric_right: "a la derecha", rubric_below: "debajo del comentario", rubric_hidden: "oculta",
-    drag: "Arrastra para cambiar el tamaño", reviewed_next: "Revisada y siguiente →",
+    drag: "Arrastra para cambiar el tamaño", reviewed_next: "Revisada y siguiente →", reviewed_last: "Marcar como revisada",
     remind_title: "¿Dejas esta sin marcar como revisada?",
     remind_text: "<p>Cuando hayas comprobado la nota y el comentario, marca la casilla <strong>Revisada</strong> (o usa <strong>Revisada y siguiente</strong>). Así el resumen muestra cuánto queda y nada se queda sin mirar.</p><p>Guardar un cambio la marca como revisada automáticamente.</p>",
     remind_stay: "Volver", remind_go: "Seguir sin marcar", remind_never: "Seguir y no volver a avisar",
@@ -90,7 +90,7 @@ const T = {
     flagged_pending: "flagged, not reviewed", open_answers: "open answers", help: "Help", theme: "Theme",
     theme_system: "System theme", theme_light: "Light", theme_dark: "Dark",
     rubric_auto: "automatic (by screen size)", rubric_right: "on the right", rubric_below: "below the feedback", rubric_hidden: "hidden",
-    drag: "Drag to resize", reviewed_next: "Reviewed and next →",
+    drag: "Drag to resize", reviewed_next: "Reviewed and next →", reviewed_last: "Mark as reviewed",
     remind_title: "Leave this one without marking it as reviewed?",
     remind_text: "<p>Once you have checked the mark and the feedback, tick <strong>Reviewed</strong> (or use <strong>Reviewed and next</strong>). The overview then shows what is left, and nothing goes unseen.</p><p>Saving a change marks it as reviewed automatically.</p>",
     remind_stay: "Go back", remind_go: "Continue without marking", remind_never: "Continue and don't remind me again",
@@ -416,6 +416,11 @@ function statementBlock(q) {
       ${q.explanation_html ? `<div><h3>${esc(L.explanation)}</h3>${q.explanation_html}</div>` : ""}</div>` : ""}</div>`;
 }
 
+// "Reviewed and next": marks what the page shows ("@visible": every answer shown) and opens the next item.
+function reviewedNextButton(keys, nextHref) {
+  return `<button data-reviewed-next="${esc(keys)}" data-next="${esc(nextHref || "")}">${esc(nextHref ? L.reviewed_next : L.reviewed_last)}</button>`;
+}
+
 function questionPager(q) {
   const i = M.questions.findIndex((x) => x.key === q.key);
   const prev = M.questions[i - 1], next = M.questions[i + 1];
@@ -423,7 +428,8 @@ function questionPager(q) {
   return `<div class="subbar">${prev ? `<a class="guard" href="#/q/${encodeURIComponent(prev.key)}" title="${esc(L.question)} ${esc(prev.number)}">←</a>` : `<span class="muted">←</span>`}
     <select class="jump" data-prefix="#/q/" aria-label="${esc(L.questions)}">${options}</select>
     ${next ? `<a class="guard" href="#/q/${encodeURIComponent(next.key)}" title="${esc(L.question)} ${esc(next.number)}">→</a>` : `<span class="muted">→</span>`}
-    <span class="muted small">${i + 1} / ${M.questions.length}</span></div>`;
+    <span class="muted small">${i + 1} / ${M.questions.length}</span>
+    ${reviewedNextButton("@visible", next ? `#/q/${encodeURIComponent(next.key)}` : "")}</div>`;
 }
 
 function filterBar(showSort = true, count = null) {
@@ -555,7 +561,8 @@ function studentPager(s) {
   return `<div class="subbar">${prev ? `<a class="guard" data-from="${esc(from)}" href="#/s/${encodeURIComponent(prev.key)}" title="${esc(studentName(prev))}">←</a>` : `<span class="muted">←</span>`}
     <select class="jump" data-from="${esc(from)}" data-prefix="#/s/" aria-label="${esc(L.students)}">${options}</select>
     ${next ? `<a class="guard" data-from="${esc(from)}" href="#/s/${encodeURIComponent(next.key)}" title="${esc(studentName(next))}">→</a>` : `<span class="muted">→</span>`}
-    <span class="muted small">${i + 1} / ${list.length}</span></div>`;
+    <span class="muted small">${i + 1} / ${list.length}</span>
+    ${reviewedNextButton("@visible", next ? `#/s/${encodeURIComponent(next.key)}` : "")}</div>`;
 }
 
 function studentView(key) {
@@ -751,7 +758,7 @@ function submissionView(key) {
       <select class="jump" data-from="${esc(from)}" data-prefix="#/sub/" aria-label="${esc(L.submissions)}">${options}</select>
       ${next ? `<a class="guard" data-from="${esc(from)}" href="#/sub/${encodeURIComponent(next.key)}" title="${esc(label(next))}">→</a>` : `<span class="muted">→</span>`}
       <span class="muted small">${i + 1} / ${M.submissions.length}</span>
-      ${next ? `<button data-reviewed-next="${esc(s.key)}" data-next="#/sub/${encodeURIComponent(next.key)}">${esc(L.reviewed_next)}</button>` : ""}
+      ${reviewedNextButton(s.key, next ? `#/sub/${encodeURIComponent(next.key)}` : "")}
       <span style="flex:1"></span>
       ${M.rubric_html ? `<label class="small muted">${esc(L.rubric_file)} <select data-rubric-mode>${modeOptions}</select></label>` : ""}</div>
     <div class="panes" data-panes>${html}</div>`;
@@ -833,7 +840,10 @@ function bindLayout(root) {
   root.querySelectorAll("select.jump").forEach((sel) => sel.addEventListener("change", () =>
     guardedGo(sel.dataset.from, `${sel.dataset.prefix}${encodeURIComponent(sel.value)}`)));
   root.querySelectorAll("[data-reviewed-next]").forEach((b) => b.addEventListener("click", async () => {
-    if (await setReviewed([b.dataset.reviewedNext], true)) location.hash = b.dataset.next;
+    const keys = b.dataset.reviewedNext === "@visible"
+      ? [...root.querySelectorAll("[data-reviewed]")].map((el) => el.dataset.reviewed) : [b.dataset.reviewedNext];
+    if (!(await setReviewed(keys, true))) return;
+    if (b.dataset.next) location.hash = b.dataset.next; else render(false);
   }));
   root.querySelectorAll("[data-rubric-mode]").forEach((sel) => sel.addEventListener("change", () => {
     const layout = { ...pref("layout", { files: 50, feedback: 30, rubric: 20 }), rubricMode: sel.value };
