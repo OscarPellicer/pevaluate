@@ -82,7 +82,10 @@ tr:hover td { background: var(--accent-soft); }
 .cgutter::after { content: ""; position: absolute; top: 0; bottom: 0; left: 5px; width: 2px; border-radius: 2px; background: var(--line); }
 .cgutter:hover::after { background: var(--accent); }
 body.dragging { user-select: none; cursor: col-resize; }
-@media (max-width: 900px) { .answer .grid { grid-template-columns: 1fr; } .cgutter { display: none; } }
+.answer .grid.info3 { grid-template-columns: minmax(0, var(--imgw3, 40%)) 12px minmax(0, 1fr) 12px minmax(0, var(--infow, 30%)); }
+.answer .grid.info2 { grid-template-columns: minmax(0, 1fr) 12px minmax(0, var(--infow, 40%)); }
+.info-cell .qinfo { margin: 0; }
+@media (max-width: 900px) { .answer .grid, .answer .grid.info3, .answer .grid.info2 { grid-template-columns: 1fr; } .cgutter { display: none; } }
 .answer textarea { min-height: 8rem; }
 .hint { color: var(--muted); font-size: .78em; margin-top: -.2rem; }
 img.scan { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: zoom-in; }
@@ -194,3 +197,7 @@ main.wide .cards { grid-template-columns: repeat(auto-fit, minmax(180px, 260px))
 body { padding-bottom: 1.8rem; }
 #offline { position: sticky; top: 3rem; z-index: 9; padding: .6rem 1rem; background: var(--bad-soft); color: var(--bad); border-bottom: 1px solid var(--line); }
 #offline code { user-select: all; color: var(--text); }
+.qinfo { border: 1px solid var(--line); border-radius: 6px; padding: .3rem .6rem; margin-bottom: .6rem; }
+.qinfo[open] { padding-bottom: .6rem; }
+.qinfo h3 { font-size: .95em; margin: .6rem 0 .2rem; }
+.qinfo .statement { margin-top: .4rem; }

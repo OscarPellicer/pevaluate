@@ -13,11 +13,11 @@ const T = {
     in_list_no_work: "En la lista de clase sin examen ni entrega", save: "Guardar", score: "Puntuación",
     feedback: "Comentario (lo lee el estudiante)", preview: "Vista previa", model_original: "Original del modelo",
     transcription: "Transcripción", warnings: "Avisos del corrector", expected: "Respuesta esperada", rubric: "Rúbrica",
-    explanation: "Explicación", statement: "Enunciado", all: "Todas", only_flagged: "Con avisos", only_edited: "Editadas",
+    explanation: "Explicación", statement: "Enunciado", question_info: "Enunciado, respuesta esperada y rúbrica", all: "Todas", only_flagged: "Con avisos", only_edited: "Editadas",
     not_reviewed: "Sin revisar", sort_score: "Ordenar por puntuación", sort_name: "Ordenar por nombre",
     mark_page_reviewed: "Marcar todo lo visible como revisado", answer_sheet: "Ver la primera página escaneada (cabecera y respuestas del test, corregidas)",
     previous: "Anterior", next: "Siguiente", answer: "Respuesta", result: "Resultado", voided_all: "anulada",
-    voided_nicely: "anulada (si favorece)", stale: "Hay cambios que aún no están en las notas ni en los PDF.",
+    voided_nicely: "anulada (si favorece)", void_counts: "cuenta: sube la nota", void_dropped: "no cuenta para este alumno", open_counted: "Abiertas (sin las que no cuentan)", stale: "Hay cambios que aún no están en las notas ni en los PDF.",
     rebuild_running: "Reconstruyendo… (puede tardar un minuto)", members: "Integrantes (uno por línea)",
     submitter: "entregó", files: "Ficheros", no_files: "Sin ficheros", open_new: "Abrir en otra pestaña",
     unassigned: "Integrantes que no están en la lista de clase", twice: "En más de una entrega",
@@ -72,11 +72,11 @@ const T = {
     in_list_no_work: "In the class list without exam or submission", save: "Save", score: "Score",
     feedback: "Feedback (the student reads it)", preview: "Preview", model_original: "Model's original",
     transcription: "Transcription", warnings: "Grader warnings", expected: "Expected answer", rubric: "Rubric",
-    explanation: "Explanation", statement: "Statement", all: "All", only_flagged: "Flagged", only_edited: "Edited",
+    explanation: "Explanation", statement: "Statement", question_info: "Statement, expected answer and rubric", all: "All", only_flagged: "Flagged", only_edited: "Edited",
     not_reviewed: "Not reviewed", sort_score: "Sort by score", sort_name: "Sort by name",
     mark_page_reviewed: "Mark everything shown as reviewed", answer_sheet: "See the first scanned page (header and corrected multiple-choice answers)",
     previous: "Previous", next: "Next", answer: "Answer", result: "Result", voided_all: "voided",
-    voided_nicely: "voided (if it helps)", stale: "There are changes not yet in the marks and PDFs.",
+    voided_nicely: "voided (if it helps)", void_counts: "counts: it raises the mark", void_dropped: "does not count for this student", open_counted: "Open (without those that do not count)", stale: "There are changes not yet in the marks and PDFs.",
     rebuild_running: "Rebuilding… (may take a minute)", members: "Members (one per line)",
     submitter: "submitted", files: "Files", no_files: "No files", open_new: "Open in a new tab",
     unassigned: "Members not in the class list", twice: "In more than one submission",
@@ -183,6 +183,31 @@ async function save(kind, body, label) {
     status(e.status === 409 ? L.conflict : e instanceof TypeError ? L.offline_title : `${L.error}: ${e.message}`, true);
     return false;
   }
+}
+
+// Save one item's unsaved edits (score/mark, feedback, members). True when nothing was pending.
+async function saveDraft(key) {
+  const d = drafts[key];
+  if (!d || !d.dirty) return true;
+  let ok;
+  if (M.A && M.A[key]) {
+    const a = M.A[key];
+    ok = await save("open", { student_id: a.source.student_id, question_id: a.source.question_id,
+      score: d.score ?? a.score, feedback: d.feedback ?? a.feedback, version: M.versions.open });
+  } else {
+    const s = (M.submissions || []).find((x) => x.key === key);
+    if (!s) return true;
+    const members = (d.members ?? s.members.filter((m) => m.added !== "submitter").map((m) => m.name).join("\n")).split("\n").map((x) => x.trim()).filter(Boolean);
+    ok = await save("lab", { key: s.key, mark: d.mark ?? s.mark, feedback: d.feedback ?? s.feedback, members, version: s.version });
+  }
+  if (ok) delete drafts[key];
+  return ok;
+}
+
+// Save the pending edits of these items, then mark them as reviewed. Stops at the first failed save.
+async function saveAndReview(keys) {
+  for (const key of keys) if (!(await saveDraft(key))) return false;
+  return setReviewed(keys, true);
 }
 
 async function setReviewed(keys, value) {
@@ -488,6 +513,39 @@ function mcSelect(a, q, s) {
   return `<select data-mc="${esc(a.key)}" data-page="${esc(s.page)}" data-number="${esc(a.number)}" data-n="${letters.length}">${options}</select>`;
 }
 
+// Where the rubric goes, shared by every view (lab and exam): the teacher's choice, else by screen width.
+function rubricMode() {
+  return pref("layout", {}).rubricMode || (window.innerWidth >= 1600 ? "right" : "below");
+}
+
+function rubricModeSelect() {
+  const chosen = pref("layout", {}).rubricMode || "auto";
+  const options = [["auto", L.rubric_auto], ["right", L.rubric_right], ["below", L.rubric_below], ["hidden", L.rubric_hidden]]
+    .map(([v, l]) => `<option value="${v}" ${chosen === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+  return `<label class="small muted">${esc(L.rubric_file)} <select data-rubric-mode>${options}</select></label>`;
+}
+
+// The question as the Questions view shows it, in an answer card where the question is not otherwise on
+// screen (Students, To review): in its own column ("right") or folded below the feedback ("below").
+function questionInfo(q, open) {
+  const parts = [[L.expected, q.expected_html], [L.rubric, q.rubric_html], [L.explanation, q.explanation_html]].filter(([, h]) => h);
+  return `<details class="qinfo" ${open ? "open" : ""}><summary class="small muted">${esc(parts.length ? L.question_info : L.statement)}</summary>
+    <div class="statement">${q.text_html}${q.image ? `<img class="scan" src="${q.image}" alt="">` : ""}</div>
+    ${parts.map(([label, html]) => `<h3>${esc(label)}</h3>${html}`).join("")}</details>`;
+}
+
+// Questions left out of this student's mark (overall_marks.csv voided_questions: numbers or ids).
+function voidedFor(s, q) {
+  const ids = String((s && s.voided) || "").split(/[,;\s]+/).filter(Boolean);
+  return q.voided === "all" || (q.voided === "nicely" && (ids.includes(String(q.number)) || ids.includes(q.key)));
+}
+
+function voidBadge(s, q) {
+  if (!q || !q.voided) return "";
+  if (q.voided === "all") return `<span class="badge warn">${esc(L.voided_all)}</span>`;
+  return `<span class="badge warn">${esc(L.voided_nicely)}</span> <span class="badge ${voidedFor(s, q) ? "" : "good"}">${esc(voidedFor(s, q) ? L.void_dropped : L.void_counts)}</span>`;
+}
+
 // --- Open-answer card --------------------------------------------------------------------------------
 function openCard(a, { who = false, question = false, images: withImages = true } = {}) {
   const s = M.S[a.student], q = M.Q[a.question];
@@ -507,16 +565,18 @@ function openCard(a, { who = false, question = false, images: withImages = true 
   const head = [
     who ? `<a class="who" href="#/s/${encodeURIComponent(s.key)}">${esc(studentName(s))}</a> <span class="muted small">${esc(s.id)}</span>` : "",
     question ? `<a class="who" href="#/q/${encodeURIComponent(q.key)}">${esc(L.question)} ${esc(q.number)}</a>` : "",
+    voidBadge(s, q),
     a.edited ? `<span class="badge edited">${esc(L.edited)}</span>` : "",
     a.graded_from === "context" ? `<span class="badge accent">${esc(L.what_model_saw)}</span>` : "",
   ].join(" ");
   const score = d.score ?? a.score ?? "";
   const feedback = d.feedback ?? a.feedback;
-  // The grader's warnings, always visible, then the transcription (folded).
+  // The grader's warnings, always visible, then the transcription (open; it can be folded).
   const extras = `${a.warnings.length ? `<div class="warnings"><span class="small muted">${esc(L.warnings)}</span><ul class="small">${a.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
-    ${a.response_html ? `<details><summary>${esc(L.transcription)}</summary><div class="response">${a.response_html}</div></details>` : ""}`;
+    ${a.response_html ? `<details open><summary>${esc(L.transcription)}</summary><div class="response">${a.response_html}</div></details>` : ""}`;
   const confidence = a.confidence !== null && a.confidence !== undefined
     ? `<span class="badge ${a.confidence < .75 ? "warn" : ""}" title="${esc(L.confidence_title)}">${esc(L.confidence)} ${fmt(a.confidence)}</span>` : "";
+  const infoMode = question && q ? rubricMode() : "hidden";
   const edit = `<div class="edit cell">
         <div class="row"><label>${esc(L.score)} <input type="number" step="0.05" min="0" max="${a.max ?? ""}" value="${esc(score)}" data-score="${esc(a.key)}"></label>
           <span class="muted">/ ${fmt(a.max)}</span>${confidence}<span class="spacer" style="flex:1"></span>
@@ -527,13 +587,20 @@ function openCard(a, { who = false, question = false, images: withImages = true 
         <div class="preview" data-preview="${esc(a.key)}" ${showPreview(d, feedback) ? "" : "hidden"}>${d.preview ?? a.feedback_html ?? ""}</div>
         ${a.llm_score !== null && a.llm_score !== undefined && a.edited ? `<div class="original"><strong>${esc(L.model_original)}:</strong> ${fmt(a.llm_score)} / ${fmt(a.max)}<br>${esc(a.llm_feedback || L.empty_feedback)}</div>` : ""}
         ${extras}
+        ${infoMode === "below" ? questionInfo(q, false) : ""}
       </div>`;
+  const info = infoMode === "right"
+    ? `<div class="cgutter" data-cgutter="--infow" data-side="right" role="separator" aria-orientation="vertical" title="${esc(L.drag)}"></div>
+       <div class="cell info-cell">${questionInfo(q, true)}</div>` : "";
+  const body = images
+    ? `<div class="grid ${info ? "info3" : ""}"><div class="cell">${images}</div>
+      <div class="cgutter" data-cgutter="${info ? "--imgw3" : "--imgw"}" role="separator" aria-orientation="vertical" title="${esc(L.drag)}"></div>${edit}${info}</div>`
+    : info ? `<div class="grid info2">${edit}${info}</div>` : edit;
   return `<section class="${cls}" data-card="${esc(a.key)}">
     <div class="head">${head}<span class="spacer" style="flex:1"></span>
       <label class="small"><input type="checkbox" data-reviewed="${esc(a.key)}" ${reviewed ? "checked" : ""}> ${esc(L.reviewed)}</label></div>
     ${a.reasons.length ? `<div class="reasons">⚠ ${a.reasons.map((r) => esc(reasonText(r))).join(" · ")}</div>` : ""}
-    ${images ? `<div class="grid"><div class="cell">${images}</div>
-      <div class="cgutter" data-cgutter role="separator" aria-orientation="vertical" title="${esc(L.drag)}"></div>${edit}</div>` : edit}</section>`;
+    ${body}</section>`;
 }
 
 function reasonText(reason) {
@@ -562,7 +629,8 @@ function studentPager(s) {
     <select class="jump" data-from="${esc(from)}" data-prefix="#/s/" aria-label="${esc(L.students)}">${options}</select>
     ${next ? `<a class="guard" data-from="${esc(from)}" href="#/s/${encodeURIComponent(next.key)}" title="${esc(studentName(next))}">→</a>` : `<span class="muted">→</span>`}
     <span class="muted small">${i + 1} / ${list.length}</span>
-    ${reviewedNextButton("@visible", next ? `#/s/${encodeURIComponent(next.key)}` : "")}</div>`;
+    ${reviewedNextButton("@visible", next ? `#/s/${encodeURIComponent(next.key)}` : "")}
+    <span style="flex:1"></span>${M.answers.some((a) => a.type === "open") ? rubricModeSelect() : ""}</div>`;
 }
 
 function studentView(key) {
@@ -593,7 +661,12 @@ function studentView(key) {
   const cards = [
     [fmt(s.mark), `${L.mark} (0–10)`],
     hasMc ? [`${fmt(s.mc.score)} / ${fmt(s.mc.max)}`, L.mc_part] : null,
-    s.open ? [`${fmt(s.open.score)} / ${fmt(s.open.max)}`, L.open_part] : null,
+    s.open ? (() => {
+      const counted = opens.filter((a) => !voidedFor(s, M.Q[a.question]));
+      if (counted.length === opens.length) return [`${fmt(s.open.score)} / ${fmt(s.open.max)}`, L.open_part];
+      const sum = (k) => counted.reduce((t, a) => t + (a[k] || 0), 0);
+      return [`${fmt(sum("score"))} / ${fmt(sum("max"))}`, L.open_counted];
+    })() : null,
     s.model_id && s.page && new Set(M.students.map((x) => x.model_id)).size > 1 ? [`${L.model_short} ${s.model_id}`, L.scan_page.replace("{p}", s.page)] : null,
   ].filter(Boolean).map(([v, l]) => `<div class="card"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
   const header = `<h1>${esc(studentName(s))} <span class="muted small">${esc(s.id)}</span> ${rosterBadge(s)}</h1><div class="cards">${cards}</div>`;
@@ -621,7 +694,7 @@ function reviewView() {
   const items = M.answers.filter((a) => a.type === "open" && a.reasons.length && !isReviewed(a.key));
   const notInList = M.roster ? M.students.filter((s) => s.roster === undefined) : [];
   const double = M.students.filter((s) => s.multiple_marks);
-  return `<h1>${esc(L.review)}</h1>
+  return `<div class="subbar"><h1 style="margin:0">${esc(L.review)}</h1><span style="flex:1"></span>${items.length ? rubricModeSelect() : ""}</div>
     ${notInList.length ? `<div class="panel"><strong>${esc(L.not_in_list)}:</strong> ${notInList.map((s) => `<a class="badge bad" href="#/s/${encodeURIComponent(s.key)}">${esc(s.name || s.id)}</a>`).join(" ")}</div>` : ""}
     ${double.length ? `<div class="panel"><strong>${esc(L.mc_part)}:</strong> ${double.map((s) => `<a class="badge warn" href="#/s/${encodeURIComponent(s.key)}">${esc(studentName(s))}: ${esc(s.multiple_marks)}</a>`).join(" ")}</div>` : ""}
     ${items.length ? items.map((a) => openCard(a, { who: true, question: true })).join("") : `<p class="muted">${esc(L.none)}</p>`}`;
@@ -724,13 +797,10 @@ function submissionView(key) {
   const members = d.members ?? s.members.filter((m) => m.added !== "submitter").map((m) => m.name).join("\n");
   const layout = pref("layout", { files: 50, feedback: 30, rubric: 20 });
   // Own panel on wide screens, below the feedback otherwise, until the teacher chooses.
-  const rubricMode = M.rubric_html ? (layout.rubricMode || (window.innerWidth >= 1600 ? "right" : "below")) : "hidden";
+  const mode = M.rubric_html ? rubricMode() : "hidden";
   const from = `sub:${s.key}`;
   const options = M.submissions.map((x) => `<option value="${esc(x.key)}" ${x.key === s.key ? "selected" : ""}>${isReviewed(x.key) ? "✓ " : ""}${esc(label(x))}</option>`).join("");
-  const chosen = layout.rubricMode || "auto";
-  const modeOptions = [["auto", L.rubric_auto], ["right", L.rubric_right], ["below", L.rubric_below], ["hidden", L.rubric_hidden]]
-    .map(([v, l]) => `<option value="${v}" ${chosen === v ? "selected" : ""}>${esc(l)}</option>`).join("");
-  const rubric = `<details ${rubricMode === "right" ? "open" : ""} class="rubric-box"><summary>${esc(L.rubric_file)}</summary>${M.rubric_html || ""}</details>`;
+  const rubric = `<details ${mode === "right" ? "open" : ""} class="rubric-box"><summary>${esc(L.rubric_file)}</summary>${M.rubric_html || ""}</details>`;
   const feedbackPane = `<section class="answer pane-card ${isReviewed(s.key) ? "reviewed" : s.edited ? "edited" : ""}" data-card="${esc(s.key)}">
       <div class="head"><span class="muted small">${esc(L.submitter)}: ${esc(s.submitter.name)} ${esc(s.submitter.id)}</span>
         ${s.edited ? `<span class="badge edited">${esc(L.edited)}</span>` : ""}<span style="flex:1"></span>
@@ -746,8 +816,8 @@ function submissionView(key) {
       <details class="preview-box" ${showPreview(d, d.feedback ?? s.feedback) ? "open" : ""}><summary class="small">${esc(L.preview)}</summary>
         <div class="preview" data-preview="${esc(s.key)}">${d.preview ?? s.feedback_html}</div></details>
       ${s.edited && s.llm_mark !== null ? `<details class="original"><summary>${esc(L.model_original)}: ${fmt(s.llm_mark)} / 10</summary><pre class="rubric">${esc(s.llm_feedback || "")}</pre></details>` : ""}
-      ${rubricMode === "below" ? rubric : ""}</section>`;
-  const panes = rubricMode === "right"
+      ${mode === "below" ? rubric : ""}</section>`;
+  const panes = mode === "right"
     ? [["files", fileViewer(s)], ["feedback", feedbackPane], ["rubric", `<div class="pane-card rubric-pane">${rubric}</div>`]]
     : [["files", fileViewer(s)], ["feedback", feedbackPane]];
   const total = panes.reduce((t, [n]) => t + (layout[n] || 25), 0);
@@ -760,7 +830,7 @@ function submissionView(key) {
       <span class="muted small">${i + 1} / ${M.submissions.length}</span>
       ${reviewedNextButton(s.key, next ? `#/sub/${encodeURIComponent(next.key)}` : "")}
       <span style="flex:1"></span>
-      ${M.rubric_html ? `<label class="small muted">${esc(L.rubric_file)} <select data-rubric-mode>${modeOptions}</select></label>` : ""}</div>
+      ${M.rubric_html ? rubricModeSelect() : ""}</div>
     <div class="panes" data-panes>${html}</div>`;
 }
 
@@ -842,8 +912,9 @@ function bindLayout(root) {
   root.querySelectorAll("[data-reviewed-next]").forEach((b) => b.addEventListener("click", async () => {
     const keys = b.dataset.reviewedNext === "@visible"
       ? [...root.querySelectorAll("[data-reviewed]")].map((el) => el.dataset.reviewed) : [b.dataset.reviewedNext];
-    if (!(await setReviewed(keys, true))) return;
-    if (b.dataset.next) location.hash = b.dataset.next; else render(false);
+    const next = b.dataset.next;
+    if (!(await saveAndReview(keys))) return;  // a failed save keeps the page, with the edits
+    if (next) location.hash = next; else render(false);
   }));
   root.querySelectorAll("[data-rubric-mode]").forEach((sel) => sel.addEventListener("change", () => {
     const layout = { ...pref("layout", { files: 50, feedback: 30, rubric: 20 }), rubricMode: sel.value };
@@ -887,15 +958,17 @@ function bindCardGutters(root) {
     const grid = gutter.parentElement, box = grid.getBoundingClientRect();
     gutter.setPointerCapture(ev.pointerId);
     document.body.classList.add("dragging");
+    const name = gutter.dataset.cgutter || "--imgw", right = gutter.dataset.side === "right";
     const move = (e) => {
-      const p = Math.max(20, Math.min(80, 100 * (e.clientX - box.left) / box.width));
-      document.documentElement.style.setProperty("--imgw", `${p.toFixed(1)}%`);
+      const x = right ? box.right - e.clientX : e.clientX - box.left;
+      const p = Math.max(15, Math.min(80, 100 * x / box.width));
+      document.documentElement.style.setProperty(name, `${p.toFixed(1)}%`);
     };
     const up = () => {
       gutter.removeEventListener("pointermove", move);
       gutter.removeEventListener("pointerup", up);
       document.body.classList.remove("dragging");
-      setPref("imgw", document.documentElement.style.getPropertyValue("--imgw"));
+      setPref(name.slice(2), document.documentElement.style.getPropertyValue(name));
     };
     gutter.addEventListener("pointermove", move);
     gutter.addEventListener("pointerup", up);
@@ -959,17 +1032,9 @@ function bind(root) {
       }
     });
   });
-  root.querySelectorAll("[data-save-open]").forEach((b) => b.addEventListener("click", async () => {
-    const a = M.A[b.dataset.saveOpen], d = drafts[a.key] || {};
-    const ok = await save("open", { student_id: a.source.student_id, question_id: a.source.question_id,
-      score: d.score ?? a.score, feedback: d.feedback ?? a.feedback, version: M.versions.open });
-    if (ok) { delete drafts[a.key]; if (!isReviewed(a.key)) { await setReviewed([a.key], true); render(false); } }
-  }));
-  root.querySelectorAll("[data-save-lab]").forEach((b) => b.addEventListener("click", async () => {
-    const s = M.submissions.find((x) => x.key === b.dataset.saveLab), d = drafts[s.key] || {};
-    const members = (d.members ?? s.members.filter((m) => m.added !== "submitter").map((m) => m.name).join("\n")).split("\n").map((x) => x.trim()).filter(Boolean);
-    const ok = await save("lab", { key: s.key, mark: d.mark ?? s.mark, feedback: d.feedback ?? s.feedback, members, version: s.version });
-    if (ok) { delete drafts[s.key]; if (!isReviewed(s.key)) { await setReviewed([s.key], true); render(false); } }
+  root.querySelectorAll("[data-save-open], [data-save-lab]").forEach((b) => b.addEventListener("click", async () => {
+    const key = b.dataset.saveOpen || b.dataset.saveLab;
+    if (await saveDraft(key) && !isReviewed(key)) { await setReviewed([key], true); render(false); }
   }));
   root.querySelectorAll("[data-reviewed]").forEach((el) => el.addEventListener("change", async () => {
     if (await setReviewed([el.dataset.reviewed], el.checked)) {
@@ -982,7 +1047,7 @@ function bind(root) {
   });
   root.querySelectorAll("[data-mark-visible]").forEach((b) => b.addEventListener("click", async () => {
     const keys = [...root.querySelectorAll("[data-reviewed]")].map((el) => el.dataset.reviewed);
-    if (await setReviewed(keys, true)) render(false);
+    if (await saveAndReview(keys)) render(false);
   }));
   root.querySelectorAll("[data-mc]").forEach((el) => el.addEventListener("change", () =>
     save("mc", { page: el.dataset.page, number: el.dataset.number, letter: el.value, n_options: +el.dataset.n, version: M.versions.mc })));
@@ -1031,8 +1096,10 @@ setTimeout(ping, 10000);
 window.addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/bye"); } catch (e) { /* ignore */ } });
 
 (async () => {
-  const imgw = pref("imgw", null);
-  if (imgw) document.documentElement.style.setProperty("--imgw", imgw);
+  ["imgw", "imgw3", "infow"].forEach((name) => {
+    const width = pref(name, null);
+    if (width) document.documentElement.style.setProperty(`--${name}`, width);
+  });
   try {
     await loadModel();
     const last = pref(`part.${M.title}`, null);
